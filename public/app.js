@@ -130,7 +130,7 @@ $('revoke-btn').addEventListener('click', async () => {
 
 /* ---------------- Tabs (admin menu) ---------------- */
 
-const TABS = ['links', 'users', 'create', 'stats'];
+const TABS = ['links', 'users', 'create', 'stats', 'settings'];
 let currentTab = 'links';
 let activityPeriod = 'today';
 
@@ -337,40 +337,128 @@ function userCard(user) {
   const actions = document.createElement('div');
   actions.className = 'link-actions';
 
+  const profileBtn = document.createElement('button');
+  profileBtn.className = 'btn small';
+  profileBtn.textContent = 'პროფილი';
+  profileBtn.addEventListener('click', () => openProfile(user));
+  actions.appendChild(profileBtn);
+
   const toggleBtn = document.createElement('button');
   toggleBtn.className = 'btn small';
   toggleBtn.textContent = user.disabled ? 'ჩართვა' : 'გათიშვა';
-  toggleBtn.addEventListener('click', async () => {
-    const verb = user.disabled ? 'ჩართო' : 'გათიშო';
-    if (!window.confirm(`ნამდვილად გინდა მომხმარებელი „${user.username}" ${verb}?`)) return;
-    try {
-      await api('/api/admin/users/' + user.id, {
-        method: 'PATCH',
-        body: JSON.stringify({ disabled: !user.disabled }),
-      });
-      toast(user.disabled ? 'მომხმარებელი ჩართულია' : 'მომხმარებელი გათიშულია');
-      loadUsers();
-    } catch (e) { toast(e.message || 'შეცდომა'); }
-  });
+  toggleBtn.addEventListener('click', () => setUserDisabled(user, !user.disabled));
   actions.appendChild(toggleBtn);
 
   const delBtn = document.createElement('button');
   delBtn.className = 'btn small danger';
   delBtn.textContent = 'წაშლა';
-  delBtn.addEventListener('click', async () => {
-    if (!window.confirm(`ნამდვილად წავშალო მომხმარებელი „${user.username}"? მისი ბმულები ანონიმური გახდება, მაგრამ მუშაობას გააგრძელებს.`)) return;
-    try {
-      const data = await api('/api/admin/users/' + user.id, { method: 'DELETE' });
-      toast(`მომხმარებელი წაიშალა (${data.linksAnonymized || 0} ბმული ანონიმური გახდა)`);
-      loadUsers();
-      loadLinks();
-    } catch (e) { toast(e.message || 'შეცდომა'); }
-  });
+  delBtn.addEventListener('click', () => removeUser(user));
   actions.appendChild(delBtn);
 
   card.appendChild(actions);
   return card;
 }
+
+async function setUserDisabled(user, disabled) {
+  const verb = disabled ? 'გათიშო' : 'ჩართო';
+  if (!window.confirm(`ნამდვილად გინდა მომხმარებელი „${user.username}" ${verb}?`)) return false;
+  try {
+    await api('/api/admin/users/' + user.id, {
+      method: 'PATCH',
+      body: JSON.stringify({ disabled }),
+    });
+    toast(disabled ? 'მომხმარებელი გათიშულია' : 'მომხმარებელი ჩართულია');
+    loadUsers();
+    loadLinks();
+    return true;
+  } catch (e) { toast(e.message || 'შეცდომა'); return false; }
+}
+
+async function removeUser(user) {
+  if (!window.confirm(`ნამდვილად წავშალო მომხმარებელი „${user.username}"? მისი ბმულები ანონიმური გახდება, მაგრამ მუშაობას გააგრძელებს.`)) return false;
+  try {
+    const data = await api('/api/admin/users/' + user.id, { method: 'DELETE' });
+    toast(`მომხმარებელი წაიშალა (${data.linksAnonymized || 0} ბმული ანონიმური გახდა)`);
+    loadUsers();
+    loadLinks();
+    return true;
+  } catch (e) { toast(e.message || 'შეცდომა'); return false; }
+}
+
+/* ---------------- User profile card ---------------- */
+
+let currentProfileUser = null;
+
+async function openProfile(user) {
+  currentProfileUser = user;
+  $('profile-title').textContent = '👤 ' + user.username;
+  $('profile-email').textContent = user.email;
+  $('profile-status').textContent = user.disabled ? 'გათიშული' : (!user.emailVerified ? 'მეილი არ დასტურდება' : 'აქტიური');
+  $('profile-created').textContent = 'რეგისტრირებულია: ' + fmtDate(user.createdAt);
+  $('profile-toggle-btn').textContent = user.disabled ? 'ჩართვა' : 'გათიშვა';
+  $('profile-count').textContent = 'ბმულები იტვირთება…';
+  $('profile-links').innerHTML = '';
+  $('profile-links-empty').hidden = true;
+  $('profile-modal').hidden = false;
+  try {
+    // Fresh load without the links search filter, so the profile is complete.
+    const data = await api('/api/links');
+    const mine = (data.links || []).filter((l) => l.owner === user.username);
+    const totalClicks = mine.reduce((s, l) => s + (l.clicks || 0), 0);
+    $('profile-count').textContent = mine.length + ' ბმული · ' + totalClicks + ' გახსნა';
+    $('profile-links-empty').hidden = mine.length !== 0;
+    for (const link of mine) $('profile-links').appendChild(profileLinkRow(link));
+  } catch (e) {
+    $('profile-count').textContent = 'ბმულების ჩატვირთვა ვერ მოხერხდა.';
+  }
+}
+
+function profileLinkRow(link) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const alias = document.createElement('span');
+  alias.className = 'link-alias';
+  alias.textContent = link.shortUrl.replace(/^https?:\/\//, '');
+  top.appendChild(alias);
+  const badge = document.createElement('span');
+  badge.className = 'badge ' + (link.enabled ? 'on' : 'off');
+  badge.textContent = link.enabled ? 'აქტიური' : 'გამორთული';
+  top.appendChild(badge);
+  card.appendChild(top);
+  const dest = document.createElement('p');
+  dest.className = 'link-dest';
+  dest.textContent = link.destination;
+  card.appendChild(dest);
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = `👁 ${link.clicks} გახსნა · შექმნილია: ${fmtDate(link.createdAt)}`;
+  card.appendChild(meta);
+  return card;
+}
+
+$('profile-toggle-btn').addEventListener('click', async () => {
+  const user = currentProfileUser;
+  if (!user) return;
+  const ok = await setUserDisabled(user, !user.disabled);
+  if (ok) {
+    user.disabled = !user.disabled;
+    openProfile(user);
+  }
+});
+
+$('profile-delete-btn').addEventListener('click', async () => {
+  const user = currentProfileUser;
+  if (!user) return;
+  const ok = await removeUser(user);
+  if (ok) $('profile-modal').hidden = true;
+});
+
+$('profile-close').addEventListener('click', () => { $('profile-modal').hidden = true; });
+$('profile-modal').addEventListener('click', (e) => {
+  if (e.target === $('profile-modal')) $('profile-modal').hidden = true;
+});
 
 /* ---------------- Stats + activity ---------------- */
 // Totals + activity feed are computed client-side from the already-loaded

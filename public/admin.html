@@ -7,7 +7,7 @@
 <title>Mini Link — ადმინ პანელი</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body class="dark">
 <main class="wrap">
   <header class="header">
     <h1>Mini Link</h1>
@@ -31,12 +31,7 @@
   <!-- Dashboard (shown when logged in) -->
   <section id="app-view" hidden>
     <div class="toolbar">
-      <button id="export-btn" class="btn">ექსპორტი (JSON)</button>
-      <label class="btn file-btn">იმპორტი (JSON)
-        <input id="import-file" type="file" accept="application/json,.json" hidden>
-      </label>
       <button id="logout-btn" class="btn danger-outline">გასვლა</button>
-      <button id="revoke-btn" class="btn danger-outline">ყველა მოწყობილობიდან გამოსვლა</button>
     </div>
 
     <nav class="tabs" aria-label="ადმინ მენიუ">
@@ -44,6 +39,7 @@
       <button id="tabbtn-users" class="btn tab-btn" type="button">👥 მომხმარებლები</button>
       <button id="tabbtn-create" class="btn tab-btn" type="button">➕ ახალი ბმული</button>
       <button id="tabbtn-stats" class="btn tab-btn" type="button">📊 სტატისტიკა</button>
+      <button id="tabbtn-settings" class="btn tab-btn" type="button">⚙️ პარამეტრები</button>
     </nav>
 
     <section class="card" id="section-create" hidden>
@@ -118,7 +114,39 @@
       <p id="activity-empty" class="muted" hidden>ამ პერიოდში აქტივობა არ ყოფილა.</p>
       <div id="activity-list" class="links-list"></div>
     </section>
+
+    <section class="card" id="section-settings" hidden>
+      <h2>პარამეტრები</h2>
+      <p class="muted">ბექაფი და სესიები.</p>
+      <div class="result-actions">
+        <button id="export-btn" class="btn">ექსპორტი (JSON)</button>
+        <label class="btn file-btn">იმპორტი (JSON)
+          <input id="import-file" type="file" accept="application/json,.json" hidden>
+        </label>
+      </div>
+      <div class="result-actions">
+        <button id="revoke-btn" class="btn danger-outline">ყველა მოწყობილობიდან გამოსვლა</button>
+      </div>
+      <p class="muted">ადმინის პაროლი იცვლება Cloudflare-ის დეშბორდში: Workers → url-shortener → Settings → Variables → ADMIN_PASSWORD_HASH.</p>
+    </section>
   </section>
+
+  <!-- Profile modal -->
+  <div id="profile-modal" class="modal" hidden>
+    <div class="modal-box profile-box">
+      <h3 id="profile-title">👤 მომხმარებელი</h3>
+      <p id="profile-email" class="link-dest"></p>
+      <p class="link-meta"><span id="profile-status"></span> · <span id="profile-created"></span></p>
+      <p class="link-meta" id="profile-count"></p>
+      <div id="profile-links" class="links-list"></div>
+      <p id="profile-links-empty" class="muted" hidden>ბმულები არ აქვს.</p>
+      <div class="result-actions">
+        <button id="profile-toggle-btn" class="btn small">გათიშვა</button>
+        <button id="profile-delete-btn" class="btn small danger">წაშლა</button>
+        <button id="profile-close" class="btn small">დახურვა</button>
+      </div>
+    </div>
+  </div>
 
   <!-- QR modal -->
   <div id="qr-modal" class="modal" hidden>
