@@ -128,6 +128,27 @@ $('revoke-btn').addEventListener('click', async () => {
   toast('ყველა სესია დაიხურა');
 });
 
+/* ---------------- Tabs (admin menu) ---------------- */
+
+const TABS = ['links', 'users', 'create', 'stats'];
+let currentTab = 'links';
+let activityPeriod = 'today';
+
+function showTab(name) {
+  if (!TABS.includes(name)) name = 'links';
+  currentTab = name;
+  for (const t of TABS) {
+    $('section-' + t).hidden = t !== name;
+    $('tabbtn-' + t).classList.toggle('active', t === name);
+  }
+  if (name === 'stats') renderStats();
+  try { history.replaceState(null, '', '#' + name); } catch { /* ignore */ }
+}
+
+for (const t of TABS) {
+  $('tabbtn-' + t).addEventListener('click', () => showTab(t));
+}
+
 /* ---------------- Links ---------------- */
 
 async function loadLinks() {
@@ -150,6 +171,7 @@ function renderLinks() {
   for (const link of links) {
     list.appendChild(linkCard(link));
   }
+  renderStats();
 }
 
 function linkCard(link) {
@@ -277,6 +299,7 @@ function renderUsers() {
   for (const user of shown) {
     list.appendChild(userCard(user));
   }
+  renderStats();
 }
 
 // Live search: every keystroke filters the already-loaded users
@@ -347,6 +370,77 @@ function userCard(user) {
 
   card.appendChild(actions);
   return card;
+}
+
+/* ---------------- Stats + activity ---------------- */
+// Totals + activity feed are computed client-side from the already-loaded
+// links and users — no extra API calls. Clicks have no per-click timestamps,
+// so the feed shows creations and registrations only (who + when).
+
+function periodCutoff() {
+  const now = Date.now();
+  if (activityPeriod === 'today') {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  }
+  if (activityPeriod === '7d') return now - 7 * 24 * 60 * 60 * 1000;
+  if (activityPeriod === '30d') return now - 30 * 24 * 60 * 60 * 1000;
+  return 0; // all
+}
+
+function renderStats() {
+  $('stat-links').textContent = String(links.length);
+  $('stat-clicks').textContent = String(links.reduce((s, l) => s + (l.clicks || 0), 0));
+  $('stat-users').textContent = String(users.length);
+  $('stat-active-users').textContent = String(users.filter((u) => u.emailVerified && !u.disabled).length);
+
+  const cutoff = periodCutoff();
+  const events = [];
+  for (const link of links) {
+    if (link.createdAt >= cutoff) {
+      events.push({
+        ts: link.createdAt,
+        who: link.owner || 'ანონიმური',
+        text: 'ბმული შეიქმნა: ' + link.shortUrl.replace(/^https?:\/\//, '') + ' → ' + link.destination,
+      });
+    }
+  }
+  for (const user of users) {
+    if (user.createdAt >= cutoff) {
+      events.push({
+        ts: user.createdAt,
+        who: user.username,
+        text: 'დარეგისტრირდა: ' + user.username + ' (' + user.email + ')',
+      });
+    }
+  }
+  events.sort((a, b) => b.ts - a.ts);
+  const list = $('activity-list');
+  list.innerHTML = '';
+  $('activity-empty').hidden = events.length !== 0;
+  for (const ev of events) {
+    const item = document.createElement('div');
+    item.className = 'link-card';
+    const txt = document.createElement('p');
+    txt.className = 'link-dest';
+    txt.textContent = ev.text;
+    item.appendChild(txt);
+    const meta = document.createElement('p');
+    meta.className = 'link-meta';
+    meta.textContent = fmtDate(ev.ts) + ' · 👤 ' + ev.who;
+    item.appendChild(meta);
+    list.appendChild(item);
+  }
+}
+
+const PERIODS = ['today', '7d', '30d', 'all'];
+for (const p of PERIODS) {
+  $('period-' + p).addEventListener('click', () => {
+    activityPeriod = p;
+    for (const q of PERIODS) $('period-' + q).classList.toggle('active', q === p);
+    renderStats();
+  });
 }
 
 /* ---------------- Create link ---------------- */
@@ -535,3 +629,11 @@ $('import-file').addEventListener('change', async (e) => {
 /* ---------------- Start ---------------- */
 
 checkAuth();
+
+// Open the tab from the URL hash (#links / #users / #create / #stats).
+let startTab = 'links';
+try {
+  const h = (window.location.hash || '').slice(1);
+  if (TABS.includes(h)) startTab = h;
+} catch { /* ignore */ }
+showTab(startTab);

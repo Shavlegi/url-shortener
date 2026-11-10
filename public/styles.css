@@ -100,6 +100,16 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .file-btn { cursor: pointer; }
 
+/* Admin menu tabs + stats. */
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.tab-btn.active, .period-btn.active { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+.period-tabs { margin: 12px 0; }
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
+.stat { border: 1px solid var(--border); border-radius: 10px; padding: 12px; text-align: center; }
+.stat-num { display: block; font-size: 1.6rem; font-weight: 700; color: var(--primary); }
+.stat-label { font-size: 0.9rem; color: var(--muted); }
+.card h3 { margin: 16px 0 8px; font-size: 1.05rem; }
+
 /* v2: account bar on the public page + inline form-switch links. */
 .auth-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 16px; }
 .auth-bar span { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -39,7 +39,14 @@
       <button id="revoke-btn" class="btn danger-outline">ყველა მოწყობილობიდან გამოსვლა</button>
     </div>
 
-    <section class="card">
+    <nav class="tabs" aria-label="ადმინ მენიუ">
+      <button id="tabbtn-links" class="btn tab-btn active" type="button">🔗 ბმულები</button>
+      <button id="tabbtn-users" class="btn tab-btn" type="button">👥 მომხმარებლები</button>
+      <button id="tabbtn-create" class="btn tab-btn" type="button">➕ ახალი ბმული</button>
+      <button id="tabbtn-stats" class="btn tab-btn" type="button">📊 სტატისტიკა</button>
+    </nav>
+
+    <section class="card" id="section-create" hidden>
       <h2>ახალი ბმული</h2>
       <form id="create-form">
         <label class="field">
@@ -70,7 +77,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="section-links">
       <h2>ჩემი ბმულები</h2>
       <label class="field">
         <span class="sr-only">ძებნა</span>
@@ -81,7 +88,7 @@
       <p id="links-error" class="error" hidden></p>
     </section>
 
-    <section class="card">
+    <section class="card" id="section-users" hidden>
       <h2>მომხმარებლები</h2>
       <p class="muted">რეგისტრირებული მომხმარებლები. მომხმარებლის წაშლისას მისი ბმულები ანონიმური ხდება, მაგრამ მუშაობას აგრძელებს.</p>
       <label class="field">
@@ -91,6 +98,25 @@
       <p id="users-empty" class="muted" hidden>მომხმარებლები ჯერ არ არიან.</p>
       <div id="users-list" class="links-list"></div>
       <p id="users-error" class="error" hidden></p>
+    </section>
+
+    <section class="card" id="section-stats" hidden>
+      <h2>სტატისტიკა</h2>
+      <div class="stats-grid">
+        <div class="stat"><span class="stat-num" id="stat-links">0</span><span class="stat-label">ბმული</span></div>
+        <div class="stat"><span class="stat-num" id="stat-clicks">0</span><span class="stat-label">გახსნა</span></div>
+        <div class="stat"><span class="stat-num" id="stat-users">0</span><span class="stat-label">მომხმარებელი</span></div>
+        <div class="stat"><span class="stat-num" id="stat-active-users">0</span><span class="stat-label">აქტიური მომხმარებელი</span></div>
+      </div>
+      <h3>აქტივობა</h3>
+      <div class="tabs period-tabs" role="group" aria-label="პერიოდი">
+        <button id="period-today" class="btn small period-btn active" type="button">დღეს</button>
+        <button id="period-7d" class="btn small period-btn" type="button">7 დღე</button>
+        <button id="period-30d" class="btn small period-btn" type="button">30 დღე</button>
+        <button id="period-all" class="btn small period-btn" type="button">ყველა</button>
+      </div>
+      <p id="activity-empty" class="muted" hidden>ამ პერიოდში აქტივობა არ ყოფილა.</p>
+      <div id="activity-list" class="links-list"></div>
     </section>
   </section>
 
