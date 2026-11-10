@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ka">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ადმინის პაროლის ჰეშის გენერატორი</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 24px auto; padding: 0 16px; line-height: 1.5; color: #16213a; }
+  h1 { font-size: 1.3rem; }
+  label { display: block; font-weight: 600; margin: 12px 0 4px; }
+  input, textarea { width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #d9e0ef; border-radius: 8px; box-sizing: border-box; }
+  textarea { height: 90px; font-family: monospace; font-size: 0.85rem; }
+  button { margin-top: 14px; padding: 11px 18px; font-size: 1rem; font-weight: 700; background: #12275c; color: #fff; border: 0; border-radius: 8px; cursor: pointer; }
+  .warn { background: #fff3cd; border: 1px solid #e6c200; border-radius: 8px; padding: 12px; }
+  .ok { color: #1e7d32; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>ადმინის პაროლის ჰეშის გენერატორი</h1>
+<p>ეს გვერდი <b>მხოლოდ თქვენს ბრაუზერში</b> მუშაობს — პაროლი არსად იგზავნება.
+შექმენით ჰეში და ჩასვით Cloudflare-ში, როგორც secret <code>ADMIN_PASSWORD_HASH</code>.</p>
+
+<div class="warn"><b>ყურადღება:</b> პაროლი არასოდეს ჩაწეროთ GitHub-ზე, ჩატში ან არცერთ ფაილში.
+მხოლოდ ჰეში ინახება Cloudflare secrets-ში.</div>
+
+<label for="pw">ადმინის პაროლი (მინ. 12 სიმბოლო, ასოები + ციფრები)</label>
+<input id="pw" type="password" autocomplete="new-password" placeholder="მაგ. ძლიერი პაროლი">
+<button id="gen">ჰეშის შექმნა</button>
+<p id="msg"></p>
+
+<label for="out">ჰეში — დააკოპირეთ და ჩასვით Cloudflare secret-ად:</label>
+<textarea id="out" readonly placeholder="ჰეში აქ გამოჩნდება…"></textarea>
+<button id="copy" type="button">ჰეშის კოპირება</button>
+
+<script>
+'use strict';
+const enc = new TextEncoder();
+function b64(bytes) {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+document.getElementById('gen').addEventListener('click', async () => {
+  const msg = document.getElementById('msg');
+  const out = document.getElementById('out');
+  const pw = document.getElementById('pw').value;
+  msg.textContent = '';
+  out.value = '';
+  if (!pw || pw.length < 12) {
+    msg.textContent = 'პაროლი მინიმუმ 12 სიმბოლო უნდა იყოს.';
+    return;
+  }
+  try {
+    const iterations = 100000;
+    const salt = new Uint8Array(16);
+    crypto.getRandomValues(salt);
+    const key = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, key, 256);
+    out.value = 'pbkdf2$' + iterations + '$' + b64(salt) + '$' + b64(new Uint8Array(bits));
+    msg.textContent = 'ჰეში მზადაა ✓';
+    msg.className = 'ok';
+  } catch (e) {
+    msg.textContent = 'შეცდომა: ' + (e && e.message ? e.message : e);
+  }
+});
+document.getElementById('copy').addEventListener('click', async () => {
+  const out = document.getElementById('out');
+  if (!out.value) return;
+  try {
+    await navigator.clipboard.writeText(out.value);
+    document.getElementById('msg').textContent = 'ჰეში დაკოპირდა ✓';
+  } catch {
+    out.select();
+    document.execCommand('copy');
+    document.getElementById('msg').textContent = 'ჰეში დაკოპირდა ✓';
+  }
+});
+</script>
+</body>
+</html>

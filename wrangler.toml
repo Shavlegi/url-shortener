@@ -1,0 +1,37 @@
+# wrangler.toml — URL Shortener (Cloudflare Workers + D1 + Static Assets)
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+#
+# HOW TO USE
+# 1. Create the D1 database once:
+#      wrangler d1 create url-shortener-db
+#    Copy the printed database_id below (replace REPLACE_WITH_YOUR_D1_DATABASE_ID).
+# 2. Apply the migration:
+#      wrangler d1 migrations apply url-shortener-db --remote
+# 3. Set the secrets (never commit real values):
+#      wrangler secret put ADMIN_PASSWORD_HASH
+#      wrangler secret put SESSION_SECRET
+#    Generate ADMIN_PASSWORD_HASH with scripts/make-hash.html (opens in a browser).
+# 4. Deploy:
+#      wrangler deploy
+#
+# DASHBOARD DEPLOYMENT (no terminal): see README.md — connect this repo in the
+# Cloudflare dashboard (Workers & Pages -> Create -> Connect to Git), then add
+# the D1 binding and the two secrets in the dashboard UI.
+
+name = "url-shortener"
+main = "src/index.js"
+compatibility_date = "2025-11-01"
+
+# D1 database binding. `binding` must stay "DB" — the Worker code reads env.DB.
+[[d1_databases]]
+binding = "DB"
+database_name = "url-shortener-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Static frontend files (public/). The Worker runs first for every request
+# (routing, redirects, API) and serves these files itself via the ASSETS binding
+# (or from the embedded copy in the single-file build).
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true

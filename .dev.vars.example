@@ -1,0 +1,23 @@
+# .dev.vars.example — LOCAL DEVELOPMENT variables (Wrangler reads .dev.vars)
+#
+# Copy this file to `.dev.vars` and fill in REAL values for local testing only:
+#   cp .dev.vars.example .dev.vars
+#
+# NEVER commit `.dev.vars` (it is in .gitignore) and NEVER paste real values
+# into GitHub, chat, or any file in this repository.
+#
+# ADMIN_PASSWORD_HASH — PBKDF2-SHA256 hash of the admin password.
+# Format: pbkdf2$<iterations>$<salt base64>$<hash base64>
+# Generate it by opening scripts/make-hash.html in a browser and typing the
+# password there. Example format only (NOT a real hash):
+ADMIN_PASSWORD_HASH=pbkdf2$100000$REPLACE_WITH_BASE64_SALT$REPLACE_WITH_BASE64_HASH
+#
+# SESSION_SECRET — long random string (at least 32 characters). Used as a pepper
+# when hashing session tokens before storing them in D1. Generate with, e.g.:
+#   openssl rand -hex 32
+# Example placeholder only (NOT a real secret):
+SESSION_SECRET=REPLACE_WITH_A_LONG_RANDOM_STRING_AT_LEAST_32_CHARS
+#
+# RATE_LIMIT_SALT — optional. Extra salt mixed into rate-limit IP hashes.
+# If left empty, a built-in default is used. Any random string is fine.
+RATE_LIMIT_SALT=

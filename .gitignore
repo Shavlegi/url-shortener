@@ -1,0 +1,13 @@
+# Secrets and local state — never commit these.
+.dev.vars
+dist/
+.dev.vars
+
+# Node / Wrangler
+node_modules/
+.wrangler/
+wrangler-state/
+
+# OS / editors
+.DS_Store
+Thumbs.db
