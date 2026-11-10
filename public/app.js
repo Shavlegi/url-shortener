@@ -320,10 +320,15 @@ async function loadUsers() {
   }
 }
 
+// Users list filter: 'all' or 'active' (set from the stats cards).
+let userFilter = 'all';
+
 function filteredUsers() {
   const q = ($('user-search-input').value || '').trim().toLowerCase();
-  if (!q) return users;
-  return users.filter((u) =>
+  let list = users;
+  if (userFilter === 'active') list = list.filter((u) => u.emailVerified && !u.disabled);
+  if (!q) return list;
+  return list.filter((u) =>
     (u.username || '').toLowerCase().includes(q) ||
     (u.email || '').toLowerCase().includes(q));
 }
@@ -333,15 +338,21 @@ function renderUsers() {
   list.innerHTML = '';
   const shown = filteredUsers();
   const q = ($('user-search-input').value || '').trim();
+  $('user-filter-note').hidden = userFilter !== 'active';
   $('users-empty').hidden = shown.length !== 0;
   $('users-empty').textContent = q
     ? 'მომხმარებელი ვერ მოიძებნა.'
-    : 'მომხმარებლები ჯერ არ არიან.';
+    : (userFilter === 'active' ? 'აქტიური მომხმარებლები არ არიან.' : 'მომხმარებლები ჯერ არ არიან.');
   for (const user of shown) {
     list.appendChild(userCard(user));
   }
   renderStats();
 }
+
+$('user-filter-clear').addEventListener('click', () => {
+  userFilter = 'all';
+  renderUsers();
+});
 
 // Live search: every keystroke filters the already-loaded users
 // (username or email, case-insensitive substring) — no Enter, no reload.
@@ -508,16 +519,23 @@ $('profile-modal').addEventListener('click', (e) => {
 // (v3: click_events, link_id + clicked_at only) — they live in the
 // "ბოლო გახსნები" block and in each link's history modal, loaded on demand.
 
-function periodCutoff() {
+// Custom period state (set from the date picker).
+let customFrom = null; // epoch ms, start of day
+let customTo = null;   // epoch ms, end of day
+
+function periodRange() {
   const now = Date.now();
   if (activityPeriod === 'today') {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
-    return d.getTime();
+    return { from: d.getTime(), to: Infinity };
   }
-  if (activityPeriod === '7d') return now - 7 * 24 * 60 * 60 * 1000;
-  if (activityPeriod === '30d') return now - 30 * 24 * 60 * 60 * 1000;
-  return 0; // all
+  if (activityPeriod === '7d') return { from: now - 7 * 24 * 60 * 60 * 1000, to: Infinity };
+  if (activityPeriod === '30d') return { from: now - 30 * 24 * 60 * 60 * 1000, to: Infinity };
+  if (activityPeriod === 'custom' && customFrom !== null && customTo !== null) {
+    return { from: customFrom, to: customTo };
+  }
+  return { from: 0, to: Infinity }; // all
 }
 
 function renderStats() {
@@ -526,10 +544,10 @@ function renderStats() {
   $('stat-users').textContent = String(users.length);
   $('stat-active-users').textContent = String(users.filter((u) => u.emailVerified && !u.disabled).length);
 
-  const cutoff = periodCutoff();
+  const range = periodRange();
   const events = [];
   for (const link of links) {
-    if (link.createdAt >= cutoff) {
+    if (link.createdAt >= range.from && link.createdAt <= range.to) {
       events.push({
         ts: link.createdAt,
         who: link.owner || 'ანონიმური',
@@ -538,7 +556,7 @@ function renderStats() {
     }
   }
   for (const user of users) {
-    if (user.createdAt >= cutoff) {
+    if (user.createdAt >= range.from && user.createdAt <= range.to) {
       events.push({
         ts: user.createdAt,
         who: user.username,
@@ -669,13 +687,113 @@ $('history-modal').addEventListener('click', (e) => {
   if (e.target === $('history-modal')) $('history-modal').hidden = true;
 });
 
+/* ---------------- Stat cards: open the matching view ---------------- */
+// Links -> Links tab; Clicks -> recent-clicks block on this page;
+// Users -> Users tab (all); Active users -> Users tab, active only.
+function openStatCard(target) {
+  if (target === 'links') {
+    showTab('links');
+  } else if (target === 'clicks') {
+    showTab('stats');
+    setBelowView('recent');
+    const h = $('below-tabs');
+    if (h && h.scrollIntoView) h.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else if (target === 'users') {
+    userFilter = 'all';
+    showTab('users');
+    renderUsers();
+  } else if (target === 'active') {
+    userFilter = 'active';
+    showTab('users');
+    renderUsers();
+  }
+}
+
+const STAT_CARDS = {
+  'stat-card-links': 'links',
+  'stat-card-clicks': 'clicks',
+  'stat-card-users': 'users',
+  'stat-card-active': 'active',
+};
+for (const [id, target] of Object.entries(STAT_CARDS)) {
+  const card = $(id);
+  if (!card) continue;
+  card.addEventListener('click', () => openStatCard(target));
+  card.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openStatCard(target); }
+  });
+}
+
+/* ---------------- Stats lower blocks: popular / recent toggle -------- */
+// Only one of the two blocks below is shown at a time.
+let belowView = 'top';
+
+function setBelowView(v) {
+  belowView = v === 'recent' ? 'recent' : 'top';
+  $('below-top-wrap').hidden = belowView !== 'top';
+  $('below-recent-wrap').hidden = belowView !== 'recent';
+  $('below-top').classList.toggle('active', belowView === 'top');
+  $('below-recent').classList.toggle('active', belowView === 'recent');
+}
+
+$('below-top').addEventListener('click', () => setBelowView('top'));
+$('below-recent').addEventListener('click', () => setBelowView('recent'));
+
 const PERIODS = ['today', '7d', '30d', 'all'];
+
+function setPeriodActive(p) {
+  for (const q of PERIODS) $('period-' + q).classList.toggle('active', q === p);
+  $('period-custom').classList.toggle('active', p === 'custom');
+}
+
 for (const p of PERIODS) {
   $('period-' + p).addEventListener('click', () => {
     activityPeriod = p;
-    for (const q of PERIODS) $('period-' + q).classList.toggle('active', q === p);
+    $('custom-period').hidden = true;
+    setPeriodActive(p);
     renderStats();
   });
+}
+
+// Custom period: two date inputs + apply. Prefilled with the last 7 days.
+$('period-custom').addEventListener('click', () => {
+  const box = $('custom-period');
+  box.hidden = !box.hidden;
+  if (!box.hidden) {
+    if (!$('custom-from').value) $('custom-from').value = dateInputValue(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000));
+    if (!$('custom-to').value) $('custom-to').value = dateInputValue(new Date());
+  }
+});
+
+$('custom-apply').addEventListener('click', () => {
+  const err = $('custom-error');
+  err.hidden = true;
+  const fromV = $('custom-from').value;
+  const toV = $('custom-to').value;
+  if (!fromV || !toV) {
+    err.textContent = 'ორივე თარიღი შეიყვანეთ.';
+    err.hidden = false;
+    return;
+  }
+  const from = new Date(fromV + 'T00:00:00').getTime();
+  const to = new Date(toV + 'T23:59:59.999').getTime();
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) {
+    err.textContent = 'საწყისი თარიღი საბოლოოზე გვიანი არ უნდა იყოს.';
+    err.hidden = false;
+    return;
+  }
+  activityPeriod = 'custom';
+  customFrom = from;
+  customTo = to;
+  setPeriodActive('custom');
+  renderStats();
+});
+
+function dateInputValue(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
 }
 
 /* ---------------- Create link ---------------- */

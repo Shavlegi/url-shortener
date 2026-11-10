@@ -92,6 +92,7 @@
         <span class="sr-only">მომხმარებლების ძებნა</span>
         <input id="user-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან მეილი…">
       </label>
+      <p id="user-filter-note" class="muted" hidden>ფილტრი: მხოლოდ აქტიური მომხმარებლები · <button id="user-filter-clear" class="btn small" type="button">გასუფთავება</button></p>
       <p id="users-empty" class="muted" hidden>მომხმარებლები ჯერ არ არიან.</p>
       <div id="users-list" class="links-list"></div>
       <p id="users-error" class="error" hidden></p>
@@ -100,10 +101,10 @@
     <section class="card" id="section-stats" hidden>
       <h2>სტატისტიკა</h2>
       <div class="stats-grid">
-        <div class="stat"><span class="stat-num" id="stat-links">0</span><span class="stat-label">ბმული</span></div>
-        <div class="stat"><span class="stat-num" id="stat-clicks">0</span><span class="stat-label">გახსნა</span></div>
-        <div class="stat"><span class="stat-num" id="stat-users">0</span><span class="stat-label">მომხმარებელი</span></div>
-        <div class="stat"><span class="stat-num" id="stat-active-users">0</span><span class="stat-label">აქტიური მომხმარებელი</span></div>
+        <div class="stat stat-link" id="stat-card-links" role="button" tabindex="0" title="ბმულების ნახვა"><span class="stat-num" id="stat-links">0</span><span class="stat-label">ბმული</span></div>
+        <div class="stat stat-link" id="stat-card-clicks" role="button" tabindex="0" title="ბოლო გახსნების ნახვა"><span class="stat-num" id="stat-clicks">0</span><span class="stat-label">გახსნა</span></div>
+        <div class="stat stat-link" id="stat-card-users" role="button" tabindex="0" title="მომხმარებლების ნახვა"><span class="stat-num" id="stat-users">0</span><span class="stat-label">მომხმარებელი</span></div>
+        <div class="stat stat-link" id="stat-card-active" role="button" tabindex="0" title="აქტიური მომხმარებლების ნახვა"><span class="stat-num" id="stat-active-users">0</span><span class="stat-label">აქტიური მომხმარებელი</span></div>
       </div>
       <h3>აქტივობა</h3>
       <div class="tabs period-tabs" role="group" aria-label="პერიოდი">
@@ -111,15 +112,38 @@
         <button id="period-7d" class="btn small period-btn" type="button">7 დღე</button>
         <button id="period-30d" class="btn small period-btn" type="button">30 დღე</button>
         <button id="period-all" class="btn small period-btn" type="button">ყველა</button>
+        <button id="period-custom" class="btn small period-btn" type="button">სხვა პერიოდი</button>
+      </div>
+      <div id="custom-period" hidden>
+        <label class="field">
+          <span>საწყისი თარიღი</span>
+          <input id="custom-from" type="date">
+        </label>
+        <label class="field">
+          <span>საბოლოო თარიღი</span>
+          <input id="custom-to" type="date">
+        </label>
+        <div class="result-actions">
+          <button id="custom-apply" class="btn primary" type="button">ჩვენება</button>
+        </div>
+        <p id="custom-error" class="error" hidden></p>
       </div>
       <p id="activity-empty" class="muted" hidden>ამ პერიოდში აქტივობა არ ყოფილა.</p>
       <div id="activity-list" class="links-list"></div>
-      <h3>ყველაზე პოპულარული ბმულები</h3>
-      <p id="top-links-empty" class="muted" hidden>ბმულები ჯერ არ არის.</p>
-      <div id="top-links-list" class="links-list"></div>
-      <h3>ბოლო გახსნები</h3>
-      <p id="recent-clicks-empty" class="muted" hidden>გახსნები ჯერ არ არის.</p>
-      <div id="recent-clicks-list" class="links-list"></div>
+      <div class="tabs" id="below-tabs" role="group" aria-label="ქვემოთ ჩვენება">
+        <button id="below-top" class="btn small period-btn active" type="button">პოპულარული ბმულები</button>
+        <button id="below-recent" class="btn small period-btn" type="button">ბოლო გახსნები</button>
+      </div>
+      <div id="below-top-wrap">
+        <h3>ყველაზე პოპულარული ბმულები</h3>
+        <p id="top-links-empty" class="muted" hidden>ბმულები ჯერ არ არის.</p>
+        <div id="top-links-list" class="links-list"></div>
+      </div>
+      <div id="below-recent-wrap" hidden>
+        <h3 id="recent-clicks-heading">ბოლო გახსნები</h3>
+        <p id="recent-clicks-empty" class="muted" hidden>გახსნები ჯერ არ არის.</p>
+        <div id="recent-clicks-list" class="links-list"></div>
+      </div>
     </section>
 
     <section class="card" id="section-settings" hidden>
