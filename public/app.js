@@ -115,11 +115,14 @@ $('login-form').addEventListener('submit', async (e) => {
   }
 });
 
-$('logout-btn').addEventListener('click', async () => {
+async function doLogout() {
   try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
   setAuthed(false);
   toast('გასული ხართ');
-});
+}
+
+$('logout-btn').addEventListener('click', doLogout);
+$('settings-logout-btn').addEventListener('click', doLogout);
 
 $('revoke-btn').addEventListener('click', async () => {
   if (!window.confirm('ყველა მოწყობილობიდან გამოვიდე? ამჟამინდელი სესიაც დაიხურება და ხელახლა შესვლა დაგჭირდებათ.')) return;
@@ -148,6 +151,35 @@ function showTab(name) {
 for (const t of TABS) {
   $('tabbtn-' + t).addEventListener('click', () => showTab(t));
 }
+
+/* ---------------- Theme ---------------- */
+// Three themes (black / dark blue / white), saved per device in localStorage.
+// The inline script in admin.html already applied the saved theme before
+// first paint; here we only sync the picker buttons and the label.
+const THEMES = ['black', 'blue', 'white'];
+const THEME_NAMES = { black: 'შავი', blue: 'მუქი ლურჯი', white: 'თეთრი' };
+
+function applyTheme(name) {
+  if (!THEMES.includes(name)) name = 'black';
+  document.body.classList.remove('theme-black', 'theme-blue');
+  if (name !== 'white') document.body.classList.add('theme-' + name);
+  try { localStorage.setItem('minilink-theme', name); } catch { /* ignore */ }
+  for (const th of THEMES) {
+    const b = $('theme-' + th);
+    if (b) b.classList.toggle('active', th === name);
+  }
+  const label = $('theme-name');
+  if (label) label.textContent = THEME_NAMES[name];
+}
+
+for (const th of THEMES) {
+  const b = $('theme-' + th);
+  if (b) b.addEventListener('click', () => applyTheme(th));
+}
+
+try {
+  applyTheme(localStorage.getItem('minilink-theme') || 'black');
+} catch { applyTheme('black'); }
 
 /* ---------------- Links ---------------- */
 

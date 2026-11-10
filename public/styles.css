@@ -110,33 +110,46 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
 .stat-label { font-size: 0.9rem; color: var(--muted); }
 .card h3 { margin: 16px 0 8px; font-size: 1.05rem; }
 
-/* Dark theme (admin panel only — body.dark; the public page stays light).
-   Colors: black #0A0A0A, dark blue #12275C, white #FFFFFF. */
-body.dark { color-scheme: dark; }
-body.dark {
-  --bg: #0a0a0a;
-  --surface: #12275c;
-  --text: #ffffff;
-  --muted: #a9b8de;
-  --border: #2c4a8f;
-  --primary: #ffffff;
-  --primary-text: #12275c;
-  --accent: #8fb0ff;
-  --danger: #ff6b5e;
-  --success: #7ed491;
+/* Themes: three backgrounds — black, dark blue, white (default, no class).
+   Shared by the admin panel and the public page. */
+body.theme-black, body.theme-blue { color-scheme: dark; }
+body.theme-black {
+  --bg: #0a0a0a; --surface: #12275c;
+  --text: #ffffff; --muted: #a9b8de; --border: #2c4a8f;
+  --primary: #ffffff; --primary-text: #12275c;
+  --accent: #8fb0ff; --danger: #ff6b5e; --success: #7ed491;
 }
-body.dark .btn { background: #1a2f63; color: #fff; }
-body.dark .btn.primary { background: var(--primary); color: var(--primary-text); }
-body.dark .btn.danger { background: var(--danger); color: #fff; }
-body.dark .btn.danger-outline { background: transparent; }
-body.dark .tab-btn.active, body.dark .period-btn.active { background: var(--primary); color: var(--primary-text); }
-body.dark input[type="text"], body.dark input[type="url"], body.dark input[type="password"],
-body.dark input[type="email"], body.dark input[type="search"], body.dark input[type="date"] {
+body.theme-blue {
+  --bg: #12275c; --surface: #0a0a0a;
+  --text: #ffffff; --muted: #a9b8de; --border: #2c4a8f;
+  --primary: #ffffff; --primary-text: #12275c;
+  --accent: #8fb0ff; --danger: #ff6b5e; --success: #7ed491;
+}
+body.theme-black .btn, body.theme-blue .btn { background: #1a2f63; color: #fff; }
+body.theme-black .btn.primary, body.theme-blue .btn.primary { background: var(--primary); color: var(--primary-text); }
+body.theme-black .btn.danger, body.theme-blue .btn.danger { background: var(--danger); color: #fff; }
+body.theme-black .btn.danger-outline, body.theme-blue .btn.danger-outline { background: transparent; }
+body.theme-black .tab-btn.active, body.theme-blue .tab-btn.active,
+body.theme-black .period-btn.active, body.theme-blue .period-btn.active { background: var(--primary); color: var(--primary-text); }
+body.theme-black input[type="text"], body.theme-blue input[type="text"],
+body.theme-black input[type="url"], body.theme-blue input[type="url"],
+body.theme-black input[type="password"], body.theme-blue input[type="password"],
+body.theme-black input[type="email"], body.theme-blue input[type="email"],
+body.theme-black input[type="search"], body.theme-blue input[type="search"],
+body.theme-black input[type="date"], body.theme-blue input[type="date"] {
   background: #0b1530; color: #fff; border-color: var(--border);
 }
-body.dark input::placeholder { color: #7d8fb8; }
-body.dark .modal-box { background: var(--surface); color: var(--text); }
-body.dark .toast { background: #ffffff; color: #0a0a0a; }
+body.theme-black input::placeholder, body.theme-blue input::placeholder { color: #7d8fb8; }
+body.theme-black .modal-box, body.theme-blue .modal-box { background: var(--surface); color: var(--text); }
+body.theme-black .toast, body.theme-blue .toast { background: #ffffff; color: #0a0a0a; }
+
+/* Theme picker (three color swatches). */
+.theme-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.theme-swatch { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--border); cursor: pointer; padding: 0; }
+.theme-swatch[data-theme="black"] { background: #0a0a0a; }
+.theme-swatch[data-theme="blue"] { background: #12275c; }
+.theme-swatch[data-theme="white"] { background: #ffffff; }
+.theme-swatch.active { outline: 2px solid var(--accent); outline-offset: 2px; }
 .profile-box { max-width: 560px; text-align: left; }
 
 /* v2: account bar on the public page + inline form-switch links. */

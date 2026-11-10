@@ -45,6 +45,32 @@ async function copyText(text) {
   }
 }
 
+/* ---------------- Theme ---------------- */
+// Three themes (black / dark blue / white), saved per device in localStorage.
+// The inline script in index.html already applied the saved theme before
+// first paint; here we only sync the picker buttons.
+const THEMES = ['black', 'blue', 'white'];
+
+function applyTheme(name) {
+  if (!THEMES.includes(name)) name = 'white';
+  document.body.classList.remove('theme-black', 'theme-blue');
+  if (name !== 'white') document.body.classList.add('theme-' + name);
+  try { localStorage.setItem('minilink-theme', name); } catch { /* ignore */ }
+  for (const th of THEMES) {
+    const b = $('theme-' + th);
+    if (b) b.classList.toggle('active', th === name);
+  }
+}
+
+for (const th of THEMES) {
+  const b = $('theme-' + th);
+  if (b) b.addEventListener('click', () => applyTheme(th));
+}
+
+try {
+  applyTheme(localStorage.getItem('minilink-theme') || 'white');
+} catch { applyTheme('white'); }
+
 /* ---------------- Shorten ---------------- */
 
 $('shorten-form').addEventListener('submit', async (e) => {
