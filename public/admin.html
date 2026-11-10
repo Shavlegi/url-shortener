@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ka">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Mini Link — ადმინ პანელი: ბმულების მართვა, QR კოდები, სტატისტიკა.">
+<title>Mini Link — ადმინ პანელი</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<main class="wrap">
+  <header class="header">
+    <h1>Mini Link</h1>
+    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა</p>
+  </header>
+
+  <!-- Login (shown when logged out) -->
+  <section id="login-view" class="card" hidden>
+    <h2>ადმინისტრატორის შესვლა</h2>
+    <p class="muted">ბმულების შესაქმნელად შესვლა საჭიროა.</p>
+    <form id="login-form">
+      <label class="field">
+        <span>პაროლი</span>
+        <input id="login-password" type="password" autocomplete="current-password" required placeholder="ადმინის პაროლი">
+      </label>
+      <button type="submit" class="btn primary" id="login-btn">შესვლა</button>
+      <p id="login-error" class="error" hidden></p>
+    </form>
+  </section>
+
+  <!-- Dashboard (shown when logged in) -->
+  <section id="app-view" hidden>
+    <div class="toolbar">
+      <button id="export-btn" class="btn">ექსპორტი (JSON)</button>
+      <label class="btn file-btn">იმპორტი (JSON)
+        <input id="import-file" type="file" accept="application/json,.json" hidden>
+      </label>
+      <button id="logout-btn" class="btn danger-outline">გასვლა</button>
+      <button id="revoke-btn" class="btn danger-outline">ყველა მოწყობილობიდან გამოსვლა</button>
+    </div>
+
+    <section class="card">
+      <h2>ახალი ბმული</h2>
+      <form id="create-form">
+        <label class="field">
+          <span>გრძელი ბმული</span>
+          <input id="dest-input" type="url" inputmode="url" required placeholder="https://example.com/gvardi-lin…">
+        </label>
+        <div class="row">
+          <label class="field">
+            <span>სასურველი სახელი <small>(არასავალდებულო)</small></span>
+            <input id="alias-input" type="text" autocomplete="off" placeholder="მაგ. my-link" maxlength="32">
+            <small id="alias-hint" class="hint"></small>
+          </label>
+          <label class="field">
+            <span>ვადა <small>(არასავალდებულო)</small></span>
+            <input id="expiry-input" type="date">
+          </label>
+        </div>
+        <button type="submit" class="btn primary" id="create-btn">შეამოკლე</button>
+        <p id="create-error" class="error" hidden></p>
+      </form>
+      <div id="create-result" class="result" hidden>
+        <p>მოკლე ბმული მზადაა:</p>
+        <p class="short-url"><a id="result-link" href="#" target="_blank" rel="noopener"></a></p>
+        <div class="result-actions">
+          <button id="result-copy" class="btn">კოპირება</button>
+          <button id="result-qr" class="btn">QR კოდი</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>ჩემი ბმულები</h2>
+      <label class="field">
+        <span class="sr-only">ძებნა</span>
+        <input id="search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან ბმული…">
+      </label>
+      <p id="links-empty" class="muted" hidden>ბმულები ჯერ არ გაქვთ.</p>
+      <div id="links-list" class="links-list"></div>
+      <p id="links-error" class="error" hidden></p>
+    </section>
+  </section>
+
+  <!-- QR modal -->
+  <div id="qr-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3 id="qr-title">QR კოდი</h3>
+      <canvas id="qr-canvas" width="256" height="256"></canvas>
+      <p id="qr-url" class="short-url"></p>
+      <div class="result-actions">
+        <button id="qr-download" class="btn primary">PNG გადმოწერა</button>
+        <button id="qr-close" class="btn">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+</main>
+<script src="/qrcode.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

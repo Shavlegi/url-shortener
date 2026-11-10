@@ -7,7 +7,8 @@
  * Output: dist/worker-single-file.js
  *
  * What it does:
- *  - reads public/index.html, public/styles.css, public/app.js, public/qrcode.min.js
+ *  - reads public/index.html, public/admin.html, public/styles.css,
+ *    public/app.js, public/public.js, public/qrcode.min.js
  *  - inlines them into the `EMBEDDED_FILES` constant of src/index.js
  *  - writes the result to dist/worker-single-file.js
  *
@@ -24,8 +25,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const FILES = {
   '/index.html': { path: 'public/index.html', type: 'text/html; charset=utf-8' },
+  '/admin.html': { path: 'public/admin.html', type: 'text/html; charset=utf-8' },
   '/styles.css': { path: 'public/styles.css', type: 'text/css; charset=utf-8' },
   '/app.js': { path: 'public/app.js', type: 'text/javascript; charset=utf-8' },
+  '/public.js': { path: 'public/public.js', type: 'text/javascript; charset=utf-8' },
   '/qrcode.min.js': { path: 'public/qrcode.min.js', type: 'text/javascript; charset=utf-8' },
 };
 

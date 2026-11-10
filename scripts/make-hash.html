@@ -32,6 +32,17 @@
 <textarea id="out" readonly placeholder="ჰეში აქ გამოჩნდება…"></textarea>
 <button id="copy" type="button">ჰეშის კოპირება</button>
 
+<hr>
+<h2>SESSION_SECRET (სესიის გასაღები)</h2>
+<p>ეს შემთხვევითი სტრიქონი სესიებს იცავს. დააჭირეთ ღილაკს, დაკოპირეთ და
+ჩასვით Cloudflare-ში, როგორც secret <code>SESSION_SECRET</code>.</p>
+<button id="gen-secret" type="button">SESSION_SECRET-ის გენერირება</button>
+<p id="msg2"></p>
+
+<label for="out2">SESSION_SECRET — დააკოპირეთ და ჩასვით Cloudflare secret-ად:</label>
+<textarea id="out2" readonly placeholder="SESSION_SECRET აქ გამოჩნდება…"></textarea>
+<button id="copy2" type="button">SESSION_SECRET-ის კოპირება</button>
+
 <script>
 'use strict';
 const enc = new TextEncoder();
@@ -74,6 +85,27 @@ document.getElementById('copy').addEventListener('click', async () => {
     out.select();
     document.execCommand('copy');
     document.getElementById('msg').textContent = 'ჰეში დაკოპირდა ✓';
+  }
+});
+document.getElementById('gen-secret').addEventListener('click', () => {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  document.getElementById('out2').value = hex;
+  const m = document.getElementById('msg2');
+  m.textContent = 'SESSION_SECRET მზადაა ✓';
+  m.className = 'ok';
+});
+document.getElementById('copy2').addEventListener('click', async () => {
+  const out = document.getElementById('out2');
+  if (!out.value) return;
+  try {
+    await navigator.clipboard.writeText(out.value);
+    document.getElementById('msg2').textContent = 'SESSION_SECRET დაკოპირდა ✓';
+  } catch {
+    out.select();
+    document.execCommand('copy');
+    document.getElementById('msg2').textContent = 'SESSION_SECRET დაკოპირდა ✓';
   }
 });
 </script>

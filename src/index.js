@@ -32,9 +32,16 @@ const CONFIG = {
   maxUrlLength: 2048,
   sessionDays: 7,
   pbkdf2Iterations: 100000,
+  // Public site vs admin panel, split by hostname (see isAdminHost):
+  // the public shorten form lives on publicHost; the admin login +
+  // dashboard on adminHost and on *.workers.dev.
+  publicHost: 'minilink.space',
+  adminHost: 'admin.minilink.space',
   // Rate limits (per hashed IP).
   loginMaxAttempts: 5, // per 10 minutes
   loginWindowSec: 600,
+  publicCreateMaxPerMin: 3, // public shorten form, per IP
+  publicCreateMaxPerHour: 10, // public shorten form, per IP
   apiMaxPerMin: 60,
   redirectMaxPerMin: 120,
   maxLinksList: 200,
@@ -45,7 +52,8 @@ const CONFIG = {
 const RESERVED_ALIASES = new Set([
   'api', 'admin', 'login', 'logout', 'static', 'assets', 'dashboard',
   'qr', 'export', 'import', 'health', 'robots.txt', 'favicon.ico',
-  'sitemap.xml', 'index.html', 'app.js', 'styles.css', 'qrcode.min.js',
+  'sitemap.xml', 'index.html', 'admin.html', 'app.js', 'public.js',
+  'public', 'styles.css', 'qrcode.min.js',
 ]);
 
 // Destination hosts that are themselves URL shorteners — linking to them would
@@ -289,11 +297,11 @@ function baseDomain(host) {
  *  - no IP-literal hosts at all (v4/v6, incl. private/loopback/link-local)
  *  - no localhost / .local / .internal / .lan / single-label hosts
  *  - no non-standard ports (only 443, the https default)
- *  - must not point at this shortener's own host (self-redirect loop)
+ *  - must not point at this shortener's own hosts (public + admin — self-redirect loop)
  *  - must not be another URL shortener (redirect-chain abuse)
  *  - blocked TLDs, brand-impersonation lookalikes (see lists above)
  */
-function validateDestination(raw, ownHost) {
+function validateDestination(raw, ownHosts) {
   if (typeof raw !== 'string') return { ok: false, reason: 'ბმული ტექსტი უნდა იყოს.' };
   const input = raw.trim();
   if (!input) return { ok: false, reason: 'ბმული ცარიელია.' };
@@ -330,7 +338,7 @@ function validateDestination(raw, ownHost) {
   if (url.port && url.port !== '443') {
     return { ok: false, reason: 'არასტანდარტული პორტი დაუშვებელია.' };
   }
-  if (ownHost && (host === ownHost || host.endsWith('.' + ownHost))) {
+  if (ownHosts && ownHosts.some((h) => host === h || host.endsWith('.' + h))) {
     return { ok: false, reason: 'ბმული ამავე საიტზე მიუთითებს — ასეთი ბმულის შემოკლება დაუშვებელია.' };
   }
   if (SHORTENER_HOSTS.has(host) || SHORTENER_HOSTS.has(baseDomain(host))) {
@@ -381,9 +389,48 @@ function validateCustomAlias(alias) {
   return { ok: true, alias: a };
 }
 
+// Insert a link with an auto-generated alias. Returns the alias, or null
+// when all attempts fail (an extremely unlikely collision streak).
+async function insertAutoLink(env, destination, expiresMs) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = generateAlias();
+    try {
+      const ins = await env.DB.prepare(
+        'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks) ' +
+        'VALUES (?, ?, ?, ?, 1, 0)',
+      ).bind(candidate, destination, Date.now(), expiresMs).run();
+      if (ins.success) return candidate;
+    } catch (e) {
+      if (!String(e && e.message ? e.message : e).includes('UNIQUE')) throw e;
+    }
+  }
+  return null;
+}
+
+// True when the request arrived on an admin host: admin.minilink.space or
+// the Worker's own *.workers.dev address. Everything else is the public site.
+function isAdminHost(request) {
+  const host = new URL(request.url).host.toLowerCase();
+  return host === CONFIG.adminHost || host.endsWith('.workers.dev');
+}
+
+// All hostnames that belong to this shortener (public site + admin panel).
+// A destination pointing at any of them is a self-redirect loop.
+function ownHosts(request) {
+  const host = new URL(request.url).host;
+  const hosts = [host];
+  for (const h of [CONFIG.publicHost, CONFIG.adminHost]) {
+    if (h && !hosts.includes(h)) hosts.push(h);
+  }
+  return hosts;
+}
+
 function publicLink(request, alias) {
   const u = new URL(request.url);
-  return `${u.protocol}//${u.host}/${alias}`;
+  // Short URLs always point at the public host, even when the link was
+  // created from the admin panel (admin.minilink.space / *.workers.dev).
+  const host = isAdminHost(request) && CONFIG.publicHost ? CONFIG.publicHost : u.host;
+  return `${u.protocol}//${host}/${alias}`;
 }
 
 function linkRowToJson(request, row) {
@@ -405,15 +452,24 @@ function linkRowToJson(request, row) {
 
 const STATIC_TYPES = {
   '/index.html': 'text/html; charset=utf-8',
+  '/admin.html': 'text/html; charset=utf-8',
   '/styles.css': 'text/css; charset=utf-8',
   '/app.js': 'text/javascript; charset=utf-8',
+  '/public.js': 'text/javascript; charset=utf-8',
   '/qrcode.min.js': 'text/javascript; charset=utf-8',
   '/favicon.ico': 'image/x-icon',
 };
 
+// Files that exist only for the admin panel — never served on the public host.
+const ADMIN_ONLY_FILES = new Set(['/admin.html', '/app.js']);
+
 async function serveStatic(env, request, pathname) {
-  const file = pathname === '/' ? '/index.html' : pathname;
+  // The homepage depends on the hostname: the public host shows the public
+  // shorten form; admin hosts (admin.minilink.space, *.workers.dev) show the
+  // admin login + dashboard.
+  const file = pathname === '/' ? (isAdminHost(request) ? '/admin.html' : '/index.html') : pathname;
   if (!STATIC_TYPES[file]) return null; // not a known static file
+  if (ADMIN_ONLY_FILES.has(file) && !isAdminHost(request)) return null; // admin file on public host -> 404
   const embedded = EMBEDDED_FILES[file];
   if (embedded) {
     return new Response(embedded.body, {
@@ -521,6 +577,29 @@ async function handleApi(request, env, url) {
     return json({ authenticated: !!session });
   }
 
+  // --- Public: shorten a link (no login) -------------------------------
+  // Anyone can shorten a link from the public site. Stricter limits than
+  // the admin API: 3/min + 10/hour per hashed IP. Auto-generated alias
+  // only (no custom aliases, no expiry from the public form) — the admin
+  // can edit or delete any link from the dashboard afterwards.
+  if (path === '/api/public/shorten' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const minOk = await checkRateLimit(request, env, 'public-create', CONFIG.publicCreateMaxPerMin, 60);
+    if (!minOk) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const hourOk = await checkRateLimit(request, env, 'public-create-hour', CONFIG.publicCreateMaxPerHour, 3600);
+    if (!hourOk) return error('ლიმიტი ამოიწურა — კიდევ ბმულის შექმნა ერთ საათში შეგეძლებათ.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const v = validateDestination(parsed.body.destination, ownHosts(request));
+    if (!v.ok) return error(v.reason, 400);
+    const alias = await insertAutoLink(env, v.url, null);
+    if (!alias) return error('ბმულის შექმნა ვერ მოხერხდა — სცადეთ ხელახლა.', 500);
+    const row = await env.DB.prepare(
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE alias = ?',
+    ).bind(alias).first();
+    return json({ link: linkRowToJson(request, row) }, 201);
+  }
+
   // --- Everything below requires a session ---------------------------
   const session = await getSession(env, request);
   if (!session) return error('შესვლა საჭიროა.', 401);
@@ -581,8 +660,7 @@ async function handleApi(request, env, url) {
     if (!parsed.ok) return error(parsed.reason, 400);
     const { destination, alias, expiresAt } = parsed.body;
 
-    const ownHost = new URL(request.url).host;
-    const v = validateDestination(destination, ownHost);
+    const v = validateDestination(destination, ownHosts(request));
     if (!v.ok) return error(v.reason, 400);
 
     let expiresMs = null;
@@ -611,20 +689,7 @@ async function handleApi(request, env, url) {
         throw e;
       }
     } else {
-      // Auto-generate a 6-char alias; retry on (very unlikely) collision.
-      let inserted = null;
-      for (let attempt = 0; attempt < 5 && !inserted; attempt++) {
-        const candidate = generateAlias();
-        try {
-          const ins = await env.DB.prepare(
-            'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks) ' +
-            'VALUES (?, ?, ?, ?, 1, 0)',
-          ).bind(candidate, v.url, Date.now(), expiresMs).run();
-          if (ins.success) inserted = candidate;
-        } catch (e) {
-          if (!String(e && e.message ? e.message : e).includes('UNIQUE')) throw e;
-        }
-      }
+      const inserted = await insertAutoLink(env, v.url, expiresMs);
       if (!inserted) return error('ბმულის შექმნა ვერ მოხერხდა — სცადეთ ხელახლა.', 500);
       finalAlias = inserted;
     }
@@ -707,13 +772,13 @@ async function handleApi(request, env, url) {
     if (items.length > CONFIG.maxImportLinks) {
       return error(`ერთ იმპორტში მაქს. ${CONFIG.maxImportLinks} ბმული შეიძლება.`, 400);
     }
-    const ownHost = new URL(request.url).host;
+    const hosts = ownHosts(request);
     let inserted = 0;
     let skipped = 0;
     let invalid = 0;
     for (const item of items) {
       if (!item || typeof item !== 'object') { invalid++; continue; }
-      const v = validateDestination(item.destination, ownHost);
+      const v = validateDestination(item.destination, hosts);
       if (!v.ok) { invalid++; continue; }
       const av = validateCustomAlias(item.alias || '');
       if (!av.ok) { invalid++; continue; }

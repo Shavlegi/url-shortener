@@ -4,14 +4,23 @@ Mini Link — უფასო, თვით-ჰოსტინგის ბმ�
 ქართული ინტერფეისით, QR კოდებით და კლიკების სტატისტიკით. ვიზიტორების შესახებ
 **არანაირი მონაცემი არ ინახება** (არც IP, არც ქუქი-თრექინგი).
 
+**საჯარო საიტი:** ნებისმიერს შეუძლია ბმულის დამოკლება `minilink.space`-ზე —
+რეგისტრაციის გარეშე. **ადმინ პანელი** ცალკე მისამართზეა
+(`admin.minilink.space`, ან `*.workers.dev`) — იქ ადმინი ხედავს ყველა ბმულს
+და შლის საეჭვოს.
+
 > **English summary:** Mini Link — a free, self-hosted URL shortener on Cloudflare Workers + D1,
-> with a Georgian admin UI, QR codes and click stats. No visitor tracking of any kind.
-> Admin login uses PBKDF2-SHA256 + server-side sessions. See SECURITY.md for the
-> threat model and known limitations.
+> with a Georgian UI, QR codes and click stats. No visitor tracking of any kind.
+> The public site (minilink.space) lets anyone shorten a link; the admin panel
+> (admin.minilink.space) is separate and password-protected. Admin login uses
+> PBKDF2-SHA256 + server-side sessions. See SECURITY.md for the threat model
+> and known limitations.
 
 ## შესაძლებლობები
 
-- ბმულების შემოკლება — ავტომატური 6-სიმბოლოიანი სახელი ან თქვენი სახელი (3–32 სიმბოლო)
+- **საჯარო დამოკლება** — ნებისმიერი ვიზიტორი ამოკლებს ბმულს `minilink.space`-ზე,
+  რეგისტრაციის გარეშე (ავტომატური 6-სიმბოლოიანი სახელი; ლიმიტი: 3/წუთი + 10/საათი ერთ IP-ზე)
+- ბმულების შემოკლება ადმინიდანაც — ავტომატური 6-სიმბოლოიანი სახელი ან თქვენი სახელი (3–32 სიმბოლო)
 - სახელის ხელმისაწვდომობის შემოწმება და დუბლიკატების აკრძალვა
 - QR კოდი ყველა ბმულზე (ბრაუზერში გენერირდება, PNG გადმოწერა)
 - ბმულების სია: ძებნა, კოპირება, ჩართვა/გამორთვა, წაშლა, ვადის დაყენება
@@ -35,9 +44,11 @@ url-shortener/
 ├── migrations/
 │   └── 0001_init.sql          # D1 სქემა: links, sessions, rate_limits
 ├── public/                    # ფრონტენდი (Cloudflare Static Assets-ით)
-│   ├── index.html             # ქართული UI — შესვლა + ადმინის დეშბორდი
+│   ├── index.html             # საჯარო გვერდი — ბმულის დამოკლების ფორმა (minilink.space)
+│   ├── admin.html             # ადმინ პანელი — შესვლა + დეშბორდი (admin.minilink.space)
 │   ├── styles.css             # დიზაინი (ფერები CSS ცვლადებია — იოლად იცვლება)
-│   ├── app.js                 # დეშბორდის ლოგიკა
+│   ├── app.js                 # ადმინ დეშბორდის ლოგიკა
+│   ├── public.js              # საჯარო ფორმის ლოგიკა
 │   └── qrcode.min.js          # QR ბიბლიოთეკა (vendored, qrcode-generator 1.4.4)
 ├── src/
 │   └── index.js               # Worker: როუტინგი, API, ავტორიზაცია, რედირექტი
@@ -148,10 +159,14 @@ npx wrangler deploy
 
 ## პირველი შესვლა და ტესტირება
 
-1. გახსენით Worker-ის მისამართი (`*.workers.dev`).
-2. შედით ადმინის პაროლით (მე-4 ნაბიჯში მოფიქრებული).
-3. შექმენით სატესტო ბმული, მაგ. `https://example.com` → გახსენით მოკლე ბმული
-   ახალ ჩანართში → დარწმუნდით, რომ გადამისამართდა და კლიკების რიცხვი 1-ით გაიზარდა.
+1. გახსენით საჯარო საიტი `https://minilink.space/` — უნდა გამოჩნდეს
+   დამოკლების ფორმა (პაროლის გარეშე). შექმენით სატესტო ბმული, მაგ.
+   `https://example.com` → გახსენით მოკლე ბმული ახალ ჩანართში →
+   დარწმუნდით, რომ გადამისამართდა და კლიკების რიცხვი 1-ით გაიზარდა.
+2. გახსენით ადმინ პანელი `https://admin.minilink.space/` (ან Worker-ის
+   `*.workers.dev` მისამართი) — უნდა გამოჩნდეს შესვლის ფორმა.
+3. შედით ადმინის პაროლით (მე-4 ნაბიჯში მოფიქრებული). დეშბორდში უნდა
+   ჩანდეს საჯაროდ შექმნილი სატესტო ბმული — წაშალეთ ის.
 4. შეამოწმეთ: არასწორი პაროლი (უნდა უარყოს), არასწორი ბმული (`http://`,
    `javascript:`), დუბლიკატი სახელი, QR კოდის PNG გადმოწერა, ბმულის გამორთვა
    (უნდა დააბრუნოს 410), წაშლა, ექსპორტი/იმპორტი.
@@ -181,11 +196,17 @@ npx wrangler deploy
 
 - **სახელი: Mini Link** — სათაური `public/index.html`-შია; ფერები
   `public/styles.css`-ის `:root` ცვლადებია. შეცვალეთ და ხელახლა დადეპლოით.
-- **დომენი: minilink.space** (ნაყიდია) — Cloudflare dashboard → Worker →
-  **Settings → Custom Domains** → **Add Custom Domain** → `minilink.space`.
-  მოკლე ბმულები ავტომატურად ახალი დომენით დაიწყებს მუშაობას
-  (კოდის ცვლილება არ სჭირდება).
+- **დომენები:**
+  - **minilink.space** (ნაყიდია) — **საჯარო საიტი**: დამოკლების ფორმა, პაროლის გარეშე.
+    Cloudflare dashboard → Worker → **Settings → Custom Domains** → **Add Custom Domain** → `minilink.space`.
+  - **admin.minilink.space** — **ადმინ პანელი**: შესვლა + დეშბორდი. იმავე ადგილას
+    ემატება მეორე Custom Domain-ად (უფასო ქვედომენი, იმავე ზონაში).
+  - **`*.workers.dev`** მისამართიც ადმინ პანელს ხსნის (სარეზერვო შესასვლელი).
+  - მოკლე ბმულები ყოველთვის `minilink.space/...` სახით იქმნება — იმ შემთხვევაშიც კი,
+    როცა ადმინი ქმნის მათ ადმინ პანელიდან (კოდში `CONFIG.publicHost`).
 - მოკლე სახელის ფორმატი (6 სიმბოლო) `src/index.js`-ის `CONFIG`-ში იცვლება.
+  საჯარო ფორმის ლიმიტები (`publicCreateMaxPerMin` / `publicCreateMaxPerHour`)
+  იქვეა.
 
 ## ლოკალური გაშვება (ტესტირებისთვის)
 

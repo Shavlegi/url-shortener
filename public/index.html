@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Mini Link — მოკლე ბმულები, QR კოდები, სტატისტიკა.">
+<meta name="description" content="Mini Link — უფასო ბმულების შემოკლება. გრძელი ბმული ჩასვით და მიიღეთ მოკლე ბმული + QR კოდი.">
 <title>Mini Link — ბმულების შემოკლება</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
@@ -14,72 +14,33 @@
     <p class="subtitle">მოკლე ბმულები &bull; QR კოდები &bull; სტატისტიკა</p>
   </header>
 
-  <!-- Login (shown when logged out) -->
-  <section id="login-view" class="card" hidden>
-    <h2>ადმინისტრატორის შესვლა</h2>
-    <p class="muted">ბმულების შესაქმნელად შესვლა საჭიროა.</p>
-    <form id="login-form">
+  <section class="card">
+    <h2>ბმულის დამოკლება</h2>
+    <p class="muted">გრძელი ბმული ჩასვით და მიიღეთ მოკლე ბმული — უფასოდ, რეგისტრაციის გარეშე.</p>
+    <form id="shorten-form">
       <label class="field">
-        <span>პაროლი</span>
-        <input id="login-password" type="password" autocomplete="current-password" required placeholder="ადმინის პაროლი">
+        <span>გრძელი ბმული</span>
+        <input id="dest-input" type="url" inputmode="url" required placeholder="https://example.com/gvardi-lin…">
       </label>
-      <button type="submit" class="btn primary" id="login-btn">შესვლა</button>
-      <p id="login-error" class="error" hidden></p>
+      <button type="submit" class="btn primary" id="shorten-btn">შეამოკლე</button>
+      <p id="shorten-error" class="error" hidden></p>
     </form>
+    <div id="shorten-result" class="result" hidden>
+      <p>მოკლე ბმული მზადაა:</p>
+      <p class="short-url"><a id="result-link" href="#" target="_blank" rel="noopener"></a></p>
+      <div class="result-actions">
+        <button id="result-copy" class="btn">კოპირება</button>
+        <button id="result-qr" class="btn">QR კოდი</button>
+      </div>
+    </div>
   </section>
 
-  <!-- Dashboard (shown when logged in) -->
-  <section id="app-view" hidden>
-    <div class="toolbar">
-      <button id="export-btn" class="btn">ექსპორტი (JSON)</button>
-      <label class="btn file-btn">იმპორტი (JSON)
-        <input id="import-file" type="file" accept="application/json,.json" hidden>
-      </label>
-      <button id="logout-btn" class="btn danger-outline">გასვლა</button>
-      <button id="revoke-btn" class="btn danger-outline">ყველა მოწყობილობიდან გამოსვლა</button>
-    </div>
-
-    <section class="card">
-      <h2>ახალი ბმული</h2>
-      <form id="create-form">
-        <label class="field">
-          <span>გრძელი ბმული</span>
-          <input id="dest-input" type="url" inputmode="url" required placeholder="https://example.com/gvardi-lin…">
-        </label>
-        <div class="row">
-          <label class="field">
-            <span>სასურველი სახელი <small>(არასავალდებულო)</small></span>
-            <input id="alias-input" type="text" autocomplete="off" placeholder="მაგ. my-link" maxlength="32">
-            <small id="alias-hint" class="hint"></small>
-          </label>
-          <label class="field">
-            <span>ვადა <small>(არასავალდებულო)</small></span>
-            <input id="expiry-input" type="date">
-          </label>
-        </div>
-        <button type="submit" class="btn primary" id="create-btn">შეამოკლე</button>
-        <p id="create-error" class="error" hidden></p>
-      </form>
-      <div id="create-result" class="result" hidden>
-        <p>მოკლე ბმული მზადაა:</p>
-        <p class="short-url"><a id="result-link" href="#" target="_blank" rel="noopener"></a></p>
-        <div class="result-actions">
-          <button id="result-copy" class="btn">კოპირება</button>
-          <button id="result-qr" class="btn">QR კოდი</button>
-        </div>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>ჩემი ბმულები</h2>
-      <label class="field">
-        <span class="sr-only">ძებნა</span>
-        <input id="search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან ბმული…">
-      </label>
-      <p id="links-empty" class="muted" hidden>ბმულები ჯერ არ გაქვთ.</p>
-      <div id="links-list" class="links-list"></div>
-      <p id="links-error" class="error" hidden></p>
-    </section>
+  <section class="card">
+    <h2>როგორ მუშაობს</h2>
+    <p class="muted">1. ჩასვით გრძელი ბმული და დააჭირეთ „შეამოკლე".<br>
+    2. მიიღეთ მოკლე ბმული (minilink.space/xxxxxx) და QR კოდი.<br>
+    3. გაუზიარეთ ნებისმიერს — ბმული მაშინვე მუშაობს.</p>
+    <p class="muted">მხოლოდ https:// ბმულები მიიღება. საეჭვო ბმულები მოდერირდება და იშლება.</p>
   </section>
 
   <!-- QR modal -->
@@ -98,6 +59,6 @@
   <div id="toast" class="toast" hidden></div>
 </main>
 <script src="/qrcode.min.js"></script>
-<script src="/app.js"></script>
+<script src="/public.js"></script>
 </body>
 </html>
