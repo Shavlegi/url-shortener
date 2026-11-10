@@ -1,6 +1,12 @@
 /* Mini Link — neutral design.
    Brand colors are CSS variables: change them in :root to rebrand.
    Mobile-first, light theme. */
+
+/* The `hidden` attribute must win over any display rule below
+   (e.g. .modal uses display:flex — without this, the QR modal would
+   show on page load and cover the whole screen). */
+[hidden] { display: none !important; }
+
 :root {
   --bg: #f4f6fb;
   --surface: #ffffff;
