@@ -1,10 +1,10 @@
-# ბმულების შემოკლება (URL Shortener)
+# Mini Link — ბმულების შემოკლება
 
-ნეიტრალური, უფასო, თვით-ჰოსტინგის ბმულების შემოკლება — **Cloudflare Workers + Cloudflare D1**,
+Mini Link — უფასო, თვით-ჰოსტინგის ბმულების შემოკლება — **Cloudflare Workers + Cloudflare D1**,
 ქართული ინტერფეისით, QR კოდებით და კლიკების სტატისტიკით. ვიზიტორების შესახებ
 **არანაირი მონაცემი არ ინახება** (არც IP, არც ქუქი-თრექინგი).
 
-> **English summary:** A free, self-hosted URL shortener on Cloudflare Workers + D1,
+> **English summary:** Mini Link — a free, self-hosted URL shortener on Cloudflare Workers + D1,
 > with a Georgian admin UI, QR codes and click stats. No visitor tracking of any kind.
 > Admin login uses PBKDF2-SHA256 + server-side sessions. See SECURITY.md for the
 > threat model and known limitations.
@@ -53,7 +53,7 @@ url-shortener/
 - **Workers:** დღეში 100,000 მოთხოვნა უფასოა.
 - **D1:** 5 GB მონაცემები, დღეში 5 მლნ წაკითხვა / 100,000 ჩაწერა უფასოა.
 - **Static Assets:** უფასოა.
-- ერთადერთი ფასიანი რამ მომავალში იქნება **დომენი** (თუ მოინდომებთ) — თავად აპი
+- დომენი **minilink.space** უკვე ნაყიდია — სხვა ფასიანი არაფერია; თავად აპი
   სრულად უფასოა და თავიდან `*.workers.dev` მისამართზე იმუშავებს.
 
 ## დაყენება — ნაბიჯ-ნაბიჯ
@@ -75,7 +75,7 @@ url-shortener/
 
 ```bash
 npm install
-npx wrangler d1 create url-shortener-db
+npx wrangler d1 create mini-link-db
 ```
 
 ბრძანება დაბეჭდავს `database_id`-ს — ჩასვით `wrangler.toml`-ში
@@ -84,11 +84,11 @@ npx wrangler d1 create url-shortener-db
 მერე მიგრაციის გაშვება:
 
 ```bash
-npx wrangler d1 migrations apply url-shortener-db --remote
+npx wrangler d1 migrations apply mini-link-db --remote
 ```
 
 > დეშბორდიდან (ტერმინალის გარეშე): Cloudflare dashboard → **Workers & Pages** →
-> **D1** → **Create database** (სახელი: `url-shortener-db`) → გახსენით ბაზა →
+> **D1** → **Create database** (სახელი: `mini-link-db`) → გახსენით ბაზა →
 > **Console** ჩანართში ჩასვით `migrations/0001_init.sql`-ის შიგთავსი და გაუშვით.
 
 ### 4. ადმინის პაროლის ჰეში
@@ -122,7 +122,7 @@ openssl rand -hex 32
 npx wrangler deploy
 ```
 
-წარმატების შემდეგ მიიღებთ მისამართს, მაგ. `https://url-shortener.<თქვენი-სახელი>.workers.dev`.
+წარმატების შემდეგ მიიღებთ მისამართს, მაგ. `https://mini-link.<თქვენი-სახელი>.workers.dev`.
 
 ### 6. დეპლოი — გზა B: დეშბორდი, Git-დან (ტერმინალის გარეშე)
 
@@ -131,7 +131,7 @@ npx wrangler deploy
 3. Build settings: framework preset — **None** (ან დატოვეთ ცარიელი); Build command —
    ცარიელი; Deploy command — `npx wrangler deploy`.
 4. **Settings → Variables**-ში დაამატეთ:
-   - D1 binding: **D1 Database Bindings** → ცვლადის სახელი `DB` → აირჩიეთ `url-shortener-db`
+   - D1 binding: **D1 Database Bindings** → ცვლადის სახელი `DB` → აირჩიეთ `mini-link-db`
    - Secrets: `ADMIN_PASSWORD_HASH`, `SESSION_SECRET` (მე-5 ნაბიჯი)
 5. **Deploy** — Cloudflare თავად ააგებს და გაუშვებს Worker-ს.
 
@@ -140,7 +140,7 @@ npx wrangler deploy
 1. გაუშვით `npm run build:single` (ქმნის `dist/worker-single-file.js`-ს).
 2. Dashboard → **Workers & Pages** → **Create Worker** → **Quick Edit**.
 3. ჩასვით `dist/worker-single-file.js`-ის შიგთავსი და დააჭირეთ **Deploy**.
-4. **Settings → Variables**-ში დაამატეთ D1 binding (`DB` → `url-shortener-db`)
+4. **Settings → Variables**-ში დაამატეთ D1 binding (`DB` → `mini-link-db`)
    და ორი secret-ი (მე-5 ნაბიჯი), მერე **Redeploy**.
 
 > გზა C-ში ფრონტენდი Worker-ის შიგნითაა ჩაშენებული — განახლებისას ფაილი
@@ -158,16 +158,17 @@ npx wrangler deploy
 
 სრული სატესტო სია: იხ. SECURITY.md-ის ბოლო ნაწილი და სპეციფიკაცია.
 
-## პაროლის აღდგენა (თუ დაგავიწყდათ)
+## პაროლის შეცვლა / აღდგენა (თუ დაგავიწყდათ)
 
 პაროლის აღდგენის მეილი **არ არსებობს** — ასეა ჩაფიქრებული (უსაფრთხოება).
-აღდგენა:
+შეცვლა (იგივე ნაბიჯები აღდგენისთვისაც):
 
 1. გახსენით `scripts/make-hash.html`, შექმენით ახალი პაროლის ჰეში.
 2. Cloudflare dashboard → Worker → **Settings → Variables** → `ADMIN_PASSWORD_HASH`
    secret-ის მნიშვნელობა ახლით ჩაანაცვლეთ → **Save** → **Redeploy** (თუ საჭიროა).
-3. შედით ახალი პაროლით. ძველი სესიები ავტომატურად ძალადაკარგული არ არის —
-   თუ გინდათ, D1-ში `DELETE FROM sessions;` გაუშვით Console-დან.
+3. შედით ახალი პაროლით.
+4. დეშბორდში დააჭირეთ **„ყველა მოწყობილობიდან გამოსვლა"** — ყველა ძველი
+   სესია დაიხურება (პაროლის შეცვლა თავისით სესიებს არ ხურავს).
 
 ## ბექაფი
 
@@ -176,13 +177,14 @@ npx wrangler deploy
   გამოტოვება, დუბლიკატები არ იქმნება).
 - შეინახეთ ბექაფი უსაფრთხო ადგილას (მაგ. თქვენს ტელეფონში/Drive-ში).
 
-## ბრენდი და დომენი — მერე
+## ბრენდი და დომენი
 
-- **სახელი/ლოგო/ფერები:** ფერები `public/styles.css`-ის `:root` ცვლადებია;
-  სათაური `public/index.html`-შია. შეცვალეთ და ხელახლა დადეპლოით.
-- **დომენი:** როცა იყიდით, Cloudflare dashboard → Worker → **Settings →
-  Custom Domains** → **Add Custom Domain**. მოკლე ბმულები ავტომატურად
-  ახალი დომენით დაიწყებს მუშაობას (კოდის ცვლილება არ სჭირდება).
+- **სახელი: Mini Link** — სათაური `public/index.html`-შია; ფერები
+  `public/styles.css`-ის `:root` ცვლადებია. შეცვალეთ და ხელახლა დადეპლოით.
+- **დომენი: minilink.space** (ნაყიდია) — Cloudflare dashboard → Worker →
+  **Settings → Custom Domains** → **Add Custom Domain** → `minilink.space`.
+  მოკლე ბმულები ავტომატურად ახალი დომენით დაიწყებს მუშაობას
+  (კოდის ცვლილება არ სჭირდება).
 - მოკლე სახელის ფორმატი (6 სიმბოლო) `src/index.js`-ის `CONFIG`-ში იცვლება.
 
 ## ლოკალური გაშვება (ტესტირებისთვის)
@@ -190,7 +192,7 @@ npx wrangler deploy
 ```bash
 cp .dev.vars.example .dev.vars   # შეავსეთ რეალური მნიშვნელობებით (ლოკალურად მხოლოდ!)
 npm install
-npx wrangler d1 migrations apply url-shortener-db --local
+npx wrangler d1 migrations apply mini-link-db --local
 npx wrangler dev
 ```
 

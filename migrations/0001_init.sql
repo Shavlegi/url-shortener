@@ -1,5 +1,5 @@
--- 0001_init.sql — URL Shortener, initial schema (Cloudflare D1 / SQLite)
--- Applied with: wrangler d1 migrations apply url-shortener-db --remote
+-- 0001_init.sql — Mini Link, initial schema (Cloudflare D1 / SQLite)
+-- Applied with: wrangler d1 migrations apply mini-link-db --remote
 -- (or once, in the Cloudflare dashboard: D1 -> your database -> Console)
 
 -- Links created by the administrator.

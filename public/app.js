@@ -1,4 +1,4 @@
-/* URL Shortener — admin dashboard (vanilla JS, no framework).
+/* Mini Link — admin dashboard (vanilla JS, no framework).
    All API calls are same-origin; the session cookie is HttpOnly, so the
    frontend never sees or stores credentials. */
 'use strict';
@@ -119,6 +119,13 @@ $('logout-btn').addEventListener('click', async () => {
   try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
   setAuthed(false);
   toast('გასული ხართ');
+});
+
+$('revoke-btn').addEventListener('click', async () => {
+  if (!window.confirm('ყველა მოწყობილობიდან გამოვიდე? ამჟამინდელი სესიაც დაიხურება და ხელახლა შესვლა დაგჭირდებათ.')) return;
+  try { await api('/api/sessions', { method: 'DELETE' }); } catch { /* ignore */ }
+  setAuthed(false);
+  toast('ყველა სესია დაიხურა');
 });
 
 /* ---------------- Links ---------------- */

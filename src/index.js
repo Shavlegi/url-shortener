@@ -1,5 +1,5 @@
 /**
- * URL Shortener — Cloudflare Worker (backend + hosting)
+ * Mini Link — Cloudflare Worker (backend + hosting)
  * ======================================================
  * Stack: Cloudflare Workers + Cloudflare D1 + plain HTML/CSS/JS frontend.
  * No paid services. No visitor tracking: visitor IPs are NEVER stored —
@@ -531,6 +531,13 @@ async function handleApi(request, env, url) {
     return json({ ok: true }, 200, {
       'Set-Cookie': `session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? '; Secure' : ''}`,
     });
+  }
+
+  // --- Revoke ALL sessions (e.g. right after changing the admin password) ---
+  if (path === '/api/sessions' && method === 'DELETE') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    await env.DB.prepare('DELETE FROM sessions').run();
+    return json({ ok: true });
   }
 
   // Generic per-minute limit for authenticated API calls.
