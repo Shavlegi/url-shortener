@@ -483,7 +483,19 @@ async function serveStatic(env, request, pathname) {
     // would always serve index.html on every host.
     const assetUrl = new URL(request.url);
     assetUrl.pathname = file;
-    const res = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+    let res = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
+    // Static Assets redirects ".html" URLs to clean extensionless paths
+    // (e.g. /admin.html -> /admin, /index.html -> /). If we returned that
+    // 307 to the client, "/" would redirect to itself forever — so follow
+    // the redirect INSIDE the Worker and return the final content.
+    let hops = 0;
+    while (res.status >= 300 && res.status < 400 && hops < 3) {
+      const loc = res.headers.get('Location');
+      if (!loc) break;
+      const nextUrl = new URL(loc, assetUrl);
+      res = await env.ASSETS.fetch(new Request(nextUrl.toString(), request));
+      hops++;
+    }
     if (res.status === 404) return new Response('Not found', { status: 404 });
     return res;
   }
