@@ -57,7 +57,7 @@ body {
 .field > span { display: block; font-weight: 600; margin-bottom: 5px; font-size: 0.95rem; }
 .field small { font-weight: 400; color: var(--muted); }
 
-input[type="text"], input[type="url"], input[type="password"],
+input[type="text"], input[type="url"], input[type="password"], input[type="email"],
 input[type="search"], input[type="date"] {
   width: 100%;
   padding: 11px 12px;
@@ -99,6 +99,12 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .file-btn { cursor: pointer; }
+
+/* v2: account bar on the public page + inline form-switch links. */
+.auth-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 16px; }
+.auth-bar span { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btn.link { border: none; background: none; color: var(--accent); padding: 6px 4px; font-weight: 600; }
+.auth-switch { margin-top: 10px; font-size: 0.93rem; color: var(--muted); }
 
 .result { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .result p { margin: 4px 0; }

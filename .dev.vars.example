@@ -21,3 +21,11 @@ SESSION_SECRET=REPLACE_WITH_A_LONG_RANDOM_STRING_AT_LEAST_32_CHARS
 # RATE_LIMIT_SALT — optional. Extra salt mixed into rate-limit IP hashes.
 # If left empty, a built-in default is used. Any random string is fine.
 RATE_LIMIT_SALT=
+#
+# RESEND_API_KEY — optional (v2 only). Resend API key for user email
+# verification and password reset. If empty, users are still created as
+# unverified, but no verification email is sent and the API reports
+# "email_not_configured". Create a key at https://resend.com/api-keys
+# (free tier: 3,000 emails/mo, 100/day) and verify the sending domain
+# minilink.space there first. Example placeholder only (NOT a real key):
+RESEND_API_KEY=

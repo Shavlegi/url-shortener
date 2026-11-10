@@ -8,7 +8,7 @@
  *
  * What it does:
  *  - reads public/index.html, public/admin.html, public/styles.css,
- *    public/app.js, public/public.js, public/qrcode.min.js
+ *    public/app.js, public/public.js, public/auth.js, public/qrcode.min.js
  *  - inlines them into the `EMBEDDED_FILES` constant of src/index.js
  *  - writes the result to dist/worker-single-file.js
  *
@@ -29,6 +29,7 @@ const FILES = {
   '/styles.css': { path: 'public/styles.css', type: 'text/css; charset=utf-8' },
   '/app.js': { path: 'public/app.js', type: 'text/javascript; charset=utf-8' },
   '/public.js': { path: 'public/public.js', type: 'text/javascript; charset=utf-8' },
+  '/auth.js': { path: 'public/auth.js', type: 'text/javascript; charset=utf-8' },
   '/qrcode.min.js': { path: 'public/qrcode.min.js', type: 'text/javascript; charset=utf-8' },
 };
 

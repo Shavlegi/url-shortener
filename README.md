@@ -9,17 +9,30 @@ Mini Link — უფასო, თვით-ჰოსტინგის ბმ�
 (`admin.minilink.space`, ან `*.workers.dev`) — იქ ადმინი ხედავს ყველა ბმულს
 და შლის საეჭვოს.
 
+**v2 — მომხმარებლის ანგარიშები (ნებაყოფლობითი):** ვისაც უნდა, რეგისტრირდება
+(username + მეილი + პაროლი), მეილზე 6-ნიშნა კოდით ადასტურებს ანგარიშს და
+თავის ბმულებს საკუთარ სივრცეში („ჩემი ბმულები") ინახავს. ანონიმური დამოკლება
+ისევ მუშაობს — რეგისტრაცია სავალდებულო არ არის. ადმინი ხედავს, ვინ რა ბმული
+დაამოკლა, და მართავს მომხმარებლებს (გათიშვა/წაშლა).
+
 > **English summary:** Mini Link — a free, self-hosted URL shortener on Cloudflare Workers + D1,
 > with a Georgian UI, QR codes and click stats. No visitor tracking of any kind.
 > The public site (minilink.space) lets anyone shorten a link; the admin panel
 > (admin.minilink.space) is separate and password-protected. Admin login uses
-> PBKDF2-SHA256 + server-side sessions. See SECURITY.md for the threat model
-> and known limitations.
+> PBKDF2-SHA256 + server-side sessions. v2 adds voluntary user accounts with
+> email verification (Resend), per-user link spaces, and admin user management.
+> See SECURITY.md for the threat model and known limitations.
 
 ## შესაძლებლობები
 
 - **საჯარო დამოკლება** — ნებისმიერი ვიზიტორი ამოკლებს ბმულს `minilink.space`-ზე,
   რეგისტრაციის გარეშე (ავტომატური 6-სიმბოლოიანი სახელი; ლიმიტი: 3/წუთი + 10/საათი ერთ IP-ზე)
+- **v2 — მომხმარებლის ანგარიშები (ნებაყოფლობითი):** რეგისტრაცია username + მეილი + პაროლი;
+  მეილის ვერიფიკაცია 6-ნიშნა კოდით (10 წუთი, 5 მცდელობა); პაროლის აღდგენა მეილზე კოდით;
+  საკუთარი სივრცე „ჩემი ბმულები" (მხოლოდ თავისი ბმულები: კოპირება, QR, ჩართვა/გამორთვა, წაშლა);
+  ადმინიდან ჩანს თითოეული ბმულის მფლობელი (username ან „ანონიმური") და მომხმარებლების
+  მართვა (გათიშვა/ჩართვა, წაშლა — წაშლილი მომხმარებლის ბმულები ანონიმური ხდება
+  და მუშაობას აგრძელებს)
 - ბმულების შემოკლება ადმინიდანაც — ავტომატური 6-სიმბოლოიანი სახელი ან თქვენი სახელი (3–32 სიმბოლო)
 - სახელის ხელმისაწვდომობის შემოწმება და დუბლიკატების აკრძალვა
 - QR კოდი ყველა ბმულზე (ბრაუზერში გენერირდება, PNG გადმოწერა)
@@ -42,13 +55,17 @@ url-shortener/
 ├── package.json               # wrangler + npm სკრიპტები
 ├── wrangler.toml              # Worker + D1 binding + Static Assets
 ├── migrations/
-│   └── 0001_init.sql          # D1 სქემა: links, sessions, rate_limits
+│   ├── 0001_init.sql          # D1 სქემა: links, sessions, rate_limits
+│   └── 0002_users.sql         # v2 სქემა: users, user_sessions, email_codes, links.user_id
+│                               # (Worker-ი ამ სქემას ლაზიურადაც თავად აყენებს
+│                               # პირველ API გამოძახებაზე — იხ. src/index.js)
 ├── public/                    # ფრონტენდი (Cloudflare Static Assets-ით)
 │   ├── index.html             # საჯარო გვერდი — ბმულის დამოკლების ფორმა (minilink.space)
 │   ├── admin.html             # ადმინ პანელი — შესვლა + დეშბორდი (admin.minilink.space)
 │   ├── styles.css             # დიზაინი (ფერები CSS ცვლადებია — იოლად იცვლება)
 │   ├── app.js                 # ადმინ დეშბორდის ლოგიკა
 │   ├── public.js              # საჯარო ფორმის ლოგიკა
+│   ├── auth.js                # v2: საჯარო გვერდის ანგარიშები (რეგისტრაცია/შესვლა/ჩემი ბმულები)
 │   └── qrcode.min.js          # QR ბიბლიოთეკა (vendored, qrcode-generator 1.4.4)
 ├── src/
 │   └── index.js               # Worker: როუტინგი, API, ავტორიზაცია, რედირექტი
@@ -116,6 +133,9 @@ npx wrangler d1 migrations apply mini-link-db --remote
 ```bash
 npx wrangler secret put ADMIN_PASSWORD_HASH   # ჩასვით ჰეში მე-4 ნაბიჯიდან
 npx wrangler secret put SESSION_SECRET        # გრძელი შემთხვევითი სტრიქონი, მინ. 32 სიმბოლო
+npx wrangler secret put RESEND_API_KEY        # v2 (არასავალდებულო): Resend API გასაღები
+                                              # მეილის ვერიფიკაციისთვის — იხ. „მეილის
+                                              # გაგზავნა (v2)" ქვემოთ
 ```
 
 > დეშბორდიდან: Worker → **Settings** → **Variables** → **Add variable** →
@@ -126,6 +146,25 @@ npx wrangler secret put SESSION_SECRET        # გრძელი შემთ�
 ```bash
 openssl rand -hex 32
 ```
+
+### 5ა. მეილის გაგზავნა (v2 — მომხმარებლების ვერიფიკაცია)
+
+მეილების (ვერიფიკაციის კოდი, პაროლის აღდგენა) გასაგზავნად საჭიროა **Resend**
+(უფასო ტარიფი — 2026-11-10-ით დადასტურებული resend.com/pricing-ზე:
+**$0/თვე, 3,000 მეილი/თვე, 100/დღე, 3 დომენი**).
+
+1. შექმენით უფასო ანგარიში: https://resend.com/signup
+2. **Domains** → **Add Domain** → `minilink.space` — დაამატეთ Resend-ის
+   მიერ ნაჩვენები DNS ჩანაწერები (SPF/DKIM) Cloudflare DNS-ში და დაელოდეთ
+   დადასტურებას („Verified"). ამის გარეშე `noreply@minilink.space`-დან
+   გაგზავნა არ იმუშავებს.
+3. **API Keys** → **Create API Key** (სახელი: `mini-link`, უფლება: Sending access).
+4. გასაღები ჩასვით Cloudflare secret-ად: `RESEND_API_KEY` (ზემოთ, მე-5 ნაბიჯი).
+   გასაღები არასოდეს ჩნდება კოდში, ჩატში ან ფაილებში.
+5. თუ `RESEND_API_KEY` არ არის დაყენებული, რეგისტრაცია მაინც მუშაობს —
+   მომხმარებელი იქმნება დაუდასტურებლად, API კი აბრუნებს
+   `{error: "email_not_configured"}`-ს და ფრონტენდი აჩვენებს, რომ
+   ვერიფიკაცია დროებით მიუწვდომელია (კოდის ხელახლა გაგზავნის ღილაკით).
 
 ### 6. დეპლოი — გზა A: wrangler (რეკომენდებული)
 
@@ -172,6 +211,20 @@ npx wrangler deploy
    (უნდა დააბრუნოს 410), წაშლა, ექსპორტი/იმპორტი.
 
 სრული სატესტო სია: იხ. SECURITY.md-ის ბოლო ნაწილი და სპეციფიკაცია.
+
+### v2 — მომხმარებლების ტესტირება
+
+1. საჯარო საიტზე „რეგისტრაცია" → username + მეილი + პაროლი → კოდი მეილზე
+   უნდა მოვიდეს (თუ `RESEND_API_KEY` არ არის დაყენებული, ფრონტენდი აჩვენებს
+   „ვერიფიკაცია დროებით მიუწვდომელია" — ესეც მოსალოდნელი ქცევაა).
+2. კოდის შეყვანა → ანგარიში აქტიურდება → „ჩემი ბმულები" ჩნდება.
+3. შესული მომხმარებლის მიერ შექმნილი ბმული მის სივრცეში ჩნდება; ანონიმური
+   ბმული — არა. ადმინ პანელში ბმულის გვერდით ჩანს username (ან „ანონიმური").
+4. სხვისი ბმულის მართვის მცდელობა (`PATCH/DELETE /api/auth/links/:id`
+   სხვისი id-ით) → 403.
+5. „პაროლი დამავიწყდა" → კოდი მეილზე → ახალი პაროლი → შესვლა ახალი პაროლით.
+6. ადმინ პანელში „მომხმარებლები": გათიშვა → მომხმარებელი ვეღარ შედის;
+   წაშლა → მისი ბმულები ანონიმური ხდება და მუშაობას აგრძელებს.
 
 ## პაროლის შეცვლა / აღდგენა (თუ დაგავიწყდათ)
 

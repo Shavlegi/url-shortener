@@ -18,6 +18,13 @@
  *  - SESSION_SECRET      : long random string (pepper for session token hashes)
  * Optional:
  *  - RATE_LIMIT_SALT     : extra salt for rate-limit IP hashes
+ *  - RESEND_API_KEY      : Resend API key for user email verification +
+ *                          password reset (v2). If unset, users are still
+ *                          created as unverified, but no verification email
+ *                          is sent and the API reports "email_not_configured".
+ *                          Get one at resend.com (free tier: 3,000/mo,
+ *                          100/day) and verify minilink.space there first.
+ *                          The key lives ONLY as a Cloudflare secret.
  *
  * D1 binding: env.DB (see wrangler.toml + migrations/0001_init.sql)
  */
@@ -46,6 +53,22 @@ const CONFIG = {
   redirectMaxPerMin: 120,
   maxLinksList: 200,
   maxImportLinks: 500,
+  // v2: user accounts (voluntary — anonymous shortening stays as-is).
+  usernameMin: 3,
+  usernameMax: 20,
+  passwordMin: 8,
+  passwordMax: 128,
+  emailCodeExpiryMs: 10 * 60 * 1000, // 6-digit code valid for 10 minutes
+  emailCodeMaxAttempts: 5, // wrong code entries before it is invalidated
+  registerMaxPerHourIp: 3, // registrations per hour, per IP hash
+  registerMaxPerHourEmail: 5, // registrations per hour, per email hash
+  userLoginMaxAttempts: 5, // per 10 minutes, per username+IP hash
+  userLoginWindowSec: 600,
+  resendCodeMaxPerMin: 1, // verification-code resends per minute, per email hash
+  resendCodeMaxPerHour: 5, // verification-code resends per hour, per email hash
+  forgotMaxPerHourEmail: 3, // password-reset requests per hour, per email hash
+  forgotMaxPerHourIp: 10, // password-reset requests per hour, per IP hash
+  mailFrom: 'Mini Link <noreply@minilink.space>',
 };
 
 // Short-code namespaces that must never be usable as aliases (they are routes).
@@ -53,7 +76,7 @@ const RESERVED_ALIASES = new Set([
   'api', 'admin', 'login', 'logout', 'static', 'assets', 'dashboard',
   'qr', 'export', 'import', 'health', 'robots.txt', 'favicon.ico',
   'sitemap.xml', 'index.html', 'admin.html', 'app.js', 'public.js',
-  'public', 'styles.css', 'qrcode.min.js',
+  'auth.js', 'public', 'styles.css', 'qrcode.min.js',
 ]);
 
 // Destination hosts that are themselves URL shorteners — linking to them would
@@ -220,6 +243,312 @@ async function destroySession(env, request) {
   if (!token) return;
   const tokenHash = await sha256Hex((env.SESSION_SECRET || '') + ':' + token);
   await env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(tokenHash).run().catch(() => {});
+}
+
+/* ------------------------------------------------------------------ */
+/* v2: user accounts (voluntary) + email verification                  */
+/*                                                                     */
+/* Users are stored in the `users` table (migrations/0002_users.sql).  */
+/* Their sessions live in a SEPARATE table (`user_sessions`) and a     */
+/* SEPARATE cookie (`user_session`), so a user login never interferes  */
+/* with the admin `session` cookie. Passwords use the same PBKDF2-     */
+/* SHA256 helper shape as the admin password. Email codes are stored   */
+/* ONLY as SHA-256 hashes (peppered with SESSION_SECRET) — never as    */
+/* plaintext. Raw visitor IPs are never stored (same rule as v1).      */
+/* ------------------------------------------------------------------ */
+
+// Hash a user password into the same "pbkdf2$iter$salt$hash" format that
+// verifyPassword() understands (so admin and user passwords share code).
+async function hashPassword(password) {
+  const salt = new Uint8Array(16);
+  crypto.getRandomValues(salt);
+  const key = await crypto.subtle.importKey('raw', textEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt, iterations: CONFIG.pbkdf2Iterations, hash: 'SHA-256' },
+    key,
+    256,
+  );
+  return `pbkdf2$${CONFIG.pbkdf2Iterations}$${bytesToBase64(salt)}$${bytesToBase64(new Uint8Array(bits))}`;
+}
+
+function validateUsername(username) {
+  if (typeof username !== 'string') return { ok: false, reason: 'მომხმარებლის სახელი ტექსტი უნდა იყოს.' };
+  const u = username.trim();
+  if (u.length < CONFIG.usernameMin || u.length > CONFIG.usernameMax) {
+    return { ok: false, reason: `მომხმარებლის სახელი ${CONFIG.usernameMin}–${CONFIG.usernameMax} სიმბოლოს შორის უნდა იყოს.` };
+  }
+  if (!/^[A-Za-z0-9_]+$/.test(u)) {
+    return { ok: false, reason: 'მომხმარებლის სახელში მხოლოდ ასოები, ციფრები და _ შეიძლება.' };
+  }
+  return { ok: true, username: u };
+}
+
+function validateEmail(email) {
+  if (typeof email !== 'string') return { ok: false, reason: 'მეილი ტექსტი უნდა იყოს.' };
+  const e = email.trim().toLowerCase();
+  if (e.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e)) {
+    return { ok: false, reason: 'მეილის მისამართი არასწორია.' };
+  }
+  return { ok: true, email: e };
+}
+
+function validateUserPassword(password) {
+  if (typeof password !== 'string' || password.length < CONFIG.passwordMin) {
+    return { ok: false, reason: `პაროლი მინიმუმ ${CONFIG.passwordMin} სიმბოლოსგან უნდა შედგებოდეს.` };
+  }
+  if (password.length > CONFIG.passwordMax) {
+    return { ok: false, reason: 'პაროლი ძალიან გრძელია.' };
+  }
+  return { ok: true };
+}
+
+function userToJson(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    username: row.username,
+    email: row.email,
+    emailVerified: row.email_verified === 1,
+    disabled: row.disabled === 1,
+    createdAt: row.created_at,
+  };
+}
+
+function userSessionCookie(token, expiresAt, secure) {
+  const parts = [
+    `user_session=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'SameSite=Lax',
+    'Path=/',
+    `Max-Age=${Math.floor((expiresAt - Date.now()) / 1000)}`,
+  ];
+  if (secure) parts.push('Secure');
+  return parts.join('; ');
+}
+
+async function createUserSession(env, userId) {
+  const token = randomTokenHex(32);
+  const tokenHash = await sha256Hex((env.SESSION_SECRET || '') + ':' + token);
+  const now = Date.now();
+  const expiresAt = now + CONFIG.sessionDays * 24 * 60 * 60 * 1000;
+  await env.DB.prepare(
+    'INSERT INTO user_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+  ).bind(tokenHash, userId, now, expiresAt).run();
+  return { token, expiresAt };
+}
+
+async function getUserSession(env, request) {
+  const token = getCookie(request, 'user_session');
+  if (!token || token.length < 32) return null;
+  const tokenHash = await sha256Hex((env.SESSION_SECRET || '') + ':' + token);
+  const row = await env.DB.prepare(
+    'SELECT us.user_id, us.expires_at, u.username, u.email, u.email_verified, u.disabled ' +
+    'FROM user_sessions us JOIN users u ON u.id = us.user_id WHERE us.token_hash = ?',
+  ).bind(tokenHash).first();
+  if (!row) return null;
+  if (row.expires_at < Date.now() || row.disabled === 1) {
+    await env.DB.prepare('DELETE FROM user_sessions WHERE token_hash = ?').bind(tokenHash).run().catch(() => {});
+    return null;
+  }
+  return {
+    userId: row.user_id,
+    username: row.username,
+    email: row.email,
+    emailVerified: row.email_verified === 1,
+    expiresAt: row.expires_at,
+  };
+}
+
+async function destroyUserSession(env, request) {
+  const token = getCookie(request, 'user_session');
+  if (!token) return;
+  const tokenHash = await sha256Hex((env.SESSION_SECRET || '') + ':' + token);
+  await env.DB.prepare('DELETE FROM user_sessions WHERE token_hash = ?').bind(tokenHash).run().catch(() => {});
+}
+
+/* ---------------- Email verification codes ---------------- */
+
+function generateEmailCode() {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return String(100000 + (buf[0] % 900000)); // 6 digits, never starts with 0
+}
+
+// The code is stored only as this hash (peppered) — never as plaintext.
+async function hashEmailCode(env, code) {
+  return sha256Hex((env.SESSION_SECRET || '') + ':' + String(code).trim());
+}
+
+// Issue a fresh code for (user, purpose), invalidating any previous unused
+// one of the same purpose. Returns the PLAINTEXT code (to be emailed only;
+// it is never written to the database or to a log).
+async function issueEmailCode(env, userId, email, purpose) {
+  await env.DB.prepare(
+    'UPDATE email_codes SET used = 1 WHERE user_id = ? AND purpose = ? AND used = 0',
+  ).bind(userId, purpose).run();
+  const code = generateEmailCode();
+  const codeHash = await hashEmailCode(env, code);
+  const now = Date.now();
+  await env.DB.prepare(
+    'INSERT INTO email_codes (user_id, email, purpose, code_hash, expires_at, attempts, used, created_at) ' +
+    'VALUES (?, ?, ?, ?, ?, 0, 0, ?)',
+  ).bind(userId, email, purpose, codeHash, now + CONFIG.emailCodeExpiryMs, now).run();
+  return code;
+}
+
+// Check a submitted code. Returns { ok: true } or { ok: false, reason }.
+// A correct code is consumed (used = 1). After 5 wrong attempts the code
+// is invalidated and the user must request a new one.
+async function verifyEmailCode(env, userId, purpose, code) {
+  const row = await env.DB.prepare(
+    'SELECT id, code_hash, expires_at, attempts FROM email_codes ' +
+    'WHERE user_id = ? AND purpose = ? AND used = 0 ORDER BY created_at DESC LIMIT 1',
+  ).bind(userId, purpose).first();
+  if (!row) return { ok: false, reason: 'კოდი არასწორია ან ვადა გავიდა.' };
+  if (row.expires_at <= Date.now()) {
+    await env.DB.prepare('UPDATE email_codes SET used = 1 WHERE id = ?').bind(row.id).run().catch(() => {});
+    return { ok: false, reason: 'კოდი არასწორია ან ვადა გავიდა.' };
+  }
+  if (row.attempts >= CONFIG.emailCodeMaxAttempts) {
+    await env.DB.prepare('UPDATE email_codes SET used = 1 WHERE id = ?').bind(row.id).run().catch(() => {});
+    return { ok: false, reason: 'ძალიან ბევრი არასწორი მცდელობა — ახალი კოდი მოითხოვეთ.' };
+  }
+  const hash = await hashEmailCode(env, code);
+  if (!constantTimeEqual(hash, row.code_hash)) {
+    await env.DB.prepare('UPDATE email_codes SET attempts = attempts + 1 WHERE id = ?').bind(row.id).run().catch(() => {});
+    return { ok: false, reason: 'კოდი არასწორია.' };
+  }
+  await env.DB.prepare('UPDATE email_codes SET used = 1 WHERE id = ?').bind(row.id).run();
+  return { ok: true };
+}
+
+/* ---------------- Email sending (Resend) ---------------- */
+
+// Sends a 6-digit code via Resend (REST API: POST https://api.resend.com/emails).
+// Free tier (verified 2026-11-10 on resend.com/pricing): $0/mo, 3,000 emails/mo,
+// 100/day, 3 domains. Sending from noreply@minilink.space requires the
+// domain to be verified in Resend first (SPF/DKIM DNS records).
+// Returns { ok: true } or { ok: false, error: 'email_not_configured' |
+// 'email_send_failed' }. The code and the recipient address are NEVER logged.
+async function sendEmailCode(env, to, code, purpose) {
+  if (!env.RESEND_API_KEY) return { ok: false, error: 'email_not_configured' };
+  const isReset = purpose === 'reset';
+  const title = isReset ? 'პაროლის აღდგენა' : 'მეილის დადასტურება';
+  const subject = `Mini Link — ${isReset ? 'პაროლის აღდგენის კოდი' : 'მეილის დადასტურების კოდი'}`;
+  const text =
+    `Mini Link — ${title}\n\n` +
+    `თქვენი კოდი: ${code}\n\n` +
+    'კოდი 10 წუთით ვარგისია. თუ ეს თქვენ არ იყავით, უგულებელყავით ეს წერილი.';
+  const html =
+    '<!DOCTYPE html><html lang="ka"><body style="font-family:system-ui,sans-serif;color:#16213a">' +
+    `<h2 style="margin:0 0 12px">Mini Link — ${title}</h2>` +
+    '<p>თქვენი კოდი:</p>' +
+    `<p style="font-size:32px;font-weight:700;letter-spacing:6px;margin:8px 0">${code}</p>` +
+    '<p>კოდი 10 წუთით ვარგისია. თუ ეს თქვენ არ იყავით, უგულებელყავით ეს წერილი.</p>' +
+    '</body></html>';
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + env.RESEND_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from: CONFIG.mailFrom, to: [to], subject, html, text }),
+    });
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const j = await res.json();
+        detail = (j && (j.message || (j.error && j.error.message) || j.name)) || '';
+      } catch { /* ignore */ }
+      console.error('Resend send failed:', res.status, detail ? String(detail).slice(0, 200) : '');
+      return { ok: false, error: 'email_send_failed' };
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error('Resend send error:', e && e.message ? e.message : e);
+    return { ok: false, error: 'email_send_failed' };
+  }
+}
+
+/* ---------------- Lazy v2 schema migration ---------------- */
+
+// Applies migrations/0002_users.sql idempotently on first use, so the live
+// database (created before v2) gets the new tables without a manual step.
+// A module-level flag skips the check on warm isolates; a schema_meta
+// version flag makes a failed run retry safely on the next request.
+let v2SchemaChecked = false;
+
+async function ensureV2Schema(env) {
+  if (v2SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v2_users'",
+    ).first();
+    if (flag && flag.value === '2') {
+      v2SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+      ),
+      env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS users (' +
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+        'username TEXT NOT NULL UNIQUE, ' +
+        'email TEXT NOT NULL UNIQUE, ' +
+        'password_hash TEXT NOT NULL, ' +
+        'email_verified INTEGER NOT NULL DEFAULT 0, ' +
+        'disabled INTEGER NOT NULL DEFAULT 0, ' +
+        'created_at INTEGER NOT NULL)',
+      ),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)'),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)'),
+      env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS user_sessions (' +
+        'token_hash TEXT PRIMARY KEY, ' +
+        'user_id INTEGER NOT NULL, ' +
+        'created_at INTEGER NOT NULL, ' +
+        'expires_at INTEGER NOT NULL)',
+      ),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions (user_id)'),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions (expires_at)'),
+      env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS email_codes (' +
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+        'user_id INTEGER NOT NULL, ' +
+        'email TEXT NOT NULL, ' +
+        'purpose TEXT NOT NULL, ' +
+        'code_hash TEXT NOT NULL, ' +
+        'expires_at INTEGER NOT NULL, ' +
+        'attempts INTEGER NOT NULL DEFAULT 0, ' +
+        'used INTEGER NOT NULL DEFAULT 0, ' +
+        'created_at INTEGER NOT NULL)',
+      ),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_email_codes_user ON email_codes (user_id, purpose, used, expires_at)'),
+    ]);
+    // links.user_id: new column for existing tables. If it already exists
+    // (migration applied twice), SQLite errors with "duplicate column" —
+    // that is the expected idempotent case, so swallow it only.
+    try {
+      await env.DB.prepare('ALTER TABLE links ADD COLUMN user_id INTEGER').run();
+    } catch (e) {
+      if (!String(e && e.message ? e.message : e).includes('duplicate column')) throw e;
+    }
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_links_user ON links (user_id)').run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v2_users', '2')",
+    ).run();
+    v2SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v2 schema migration failed:', e && e.message ? e.message : e);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -391,14 +720,15 @@ function validateCustomAlias(alias) {
 
 // Insert a link with an auto-generated alias. Returns the alias, or null
 // when all attempts fail (an extremely unlikely collision streak).
-async function insertAutoLink(env, destination, expiresMs) {
+// userId: the owner (a logged-in user's id) or null for anonymous links.
+async function insertAutoLink(env, destination, expiresMs, userId = null) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = generateAlias();
     try {
       const ins = await env.DB.prepare(
-        'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks) ' +
-        'VALUES (?, ?, ?, ?, 1, 0)',
-      ).bind(candidate, destination, Date.now(), expiresMs).run();
+        'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id) ' +
+        'VALUES (?, ?, ?, ?, 1, 0, ?)',
+      ).bind(candidate, destination, Date.now(), expiresMs, userId).run();
       if (ins.success) return candidate;
     } catch (e) {
       if (!String(e && e.message ? e.message : e).includes('UNIQUE')) throw e;
@@ -443,6 +773,9 @@ function linkRowToJson(request, row) {
     expiresAt: row.expires_at,
     enabled: row.enabled === 1,
     clicks: row.clicks,
+    // Owner username when the query joined users (admin list), otherwise
+    // null — anonymous links and queries without the join.
+    owner: row.owner !== undefined && row.owner !== null ? row.owner : null,
   };
 }
 
@@ -456,6 +789,7 @@ const STATIC_TYPES = {
   '/styles.css': 'text/css; charset=utf-8',
   '/app.js': 'text/javascript; charset=utf-8',
   '/public.js': 'text/javascript; charset=utf-8',
+  '/auth.js': 'text/javascript; charset=utf-8',
   '/qrcode.min.js': 'text/javascript; charset=utf-8',
   '/favicon.ico': 'image/x-icon',
 };
@@ -572,6 +906,11 @@ async function handleApi(request, env, url) {
   const path = url.pathname;
   const method = request.method;
 
+  // v2 schema (users, user_sessions, email_codes, links.user_id) is applied
+  // lazily on first use — see ensureV2Schema. After the first successful
+  // run this is a single cached check (no extra query on warm isolates).
+  await ensureV2Schema(env);
+
   // --- Public: login -------------------------------------------------
   if (path === '/api/login' && method === 'POST') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
@@ -610,12 +949,288 @@ async function handleApi(request, env, url) {
     if (!parsed.ok) return error(parsed.reason, 400);
     const v = validateDestination(parsed.body.destination, ownHosts(request));
     if (!v.ok) return error(v.reason, 400);
-    const alias = await insertAutoLink(env, v.url, null);
+    // v2: a logged-in user gets the link in their own space; logged-out
+    // visitors keep creating anonymous links exactly as before.
+    let ownerId = null;
+    try {
+      const userSession = await getUserSession(env, request);
+      if (userSession) ownerId = userSession.userId;
+    } catch { /* session lookup failure -> anonymous, as before */ }
+    const alias = await insertAutoLink(env, v.url, null, ownerId);
     if (!alias) return error('ბმულის შექმნა ვერ მოხერხდა — სცადეთ ხელახლა.', 500);
     const row = await env.DB.prepare(
       'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE alias = ?',
     ).bind(alias).first();
     return json({ link: linkRowToJson(request, row) }, 201);
+  }
+
+  // --- v2: user accounts (voluntary) ----------------------------------
+  // All /api/auth/* routes are public (no admin session). They use their
+  // own user session (cookie `user_session`, table `user_sessions`), so a
+  // user login never interferes with the admin `session` cookie.
+
+  if (path === '/api/auth/register' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const ipOk = await checkRateLimit(request, env, 'register-ip', CONFIG.registerMaxPerHourIp, 3600);
+    if (!ipOk) return error('ძალიან ბევრი რეგისტრაცია. სცადეთ ერთ საათში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const uv = validateUsername(parsed.body.username);
+    if (!uv.ok) return error(uv.reason, 400);
+    const ev = validateEmail(parsed.body.email);
+    if (!ev.ok) return error(ev.reason, 400);
+    const pv = validateUserPassword(parsed.body.password);
+    if (!pv.ok) return error(pv.reason, 400);
+    const emailHash = await sha256Hex('register-email:' + ev.email);
+    const emailOk = await rateLimit(env, `register-email:${emailHash}`, CONFIG.registerMaxPerHourEmail, 3600);
+    if (!emailOk) return error('ამ მეილზე ძალიან ბევრი რეგისტრაცია. სცადეთ ერთ საათში.', 429);
+    const existing = await env.DB.prepare(
+      'SELECT username, email FROM users WHERE username = ? OR email = ?',
+    ).bind(uv.username, ev.email).first();
+    if (existing) {
+      if (existing.username === uv.username) return error('მომხმარებლის სახელი დაკავებულია.', 409);
+      return error('ამ მეილზე ანგარიში უკვე არსებობს.', 409);
+    }
+    const passwordHash = await hashPassword(parsed.body.password);
+    const ins = await env.DB.prepare(
+      'INSERT INTO users (username, email, password_hash, email_verified, disabled, created_at) ' +
+      'VALUES (?, ?, ?, 0, 0, ?)',
+    ).bind(uv.username, ev.email, passwordHash, Date.now()).run();
+    if (!ins.success) return error('რეგისტრაცია ვერ მოხერხდა — სცადეთ ხელახლა.', 500);
+    const userId = ins.meta.last_row_id;
+    const code = await issueEmailCode(env, userId, ev.email, 'verify');
+    const sent = await sendEmailCode(env, ev.email, code, 'verify');
+    const user = await env.DB.prepare(
+      'SELECT id, username, email, email_verified, disabled, created_at FROM users WHERE id = ?',
+    ).bind(userId).first();
+    const out = { user: userToJson(user), emailSent: sent.ok };
+    if (!sent.ok) out.error = sent.error; // 'email_not_configured' | 'email_send_failed'
+    return json(out, 201);
+  }
+
+  if (path === '/api/auth/verify-email' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const rateOk = await checkRateLimit(request, env, 'verify', 10, 60);
+    if (!rateOk) return error('ძალიან ბევრი მცდელობა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const ev = validateEmail(parsed.body.email);
+    if (!ev.ok) return error(ev.reason, 400);
+    const code = String(parsed.body.code || '').trim();
+    if (!/^\d{6}$/.test(code)) return error('კოდი 6 ციფრისგან უნდა შედგებოდეს.', 400);
+    const user = await env.DB.prepare(
+      'SELECT id, username, email, email_verified, disabled, created_at FROM users WHERE email = ?',
+    ).bind(ev.email).first();
+    if (!user) return error('კოდი არასწორია ან ვადა გავიდა.', 400);
+    if (user.disabled === 1) return error('ანგარიში გათიშულია.', 403);
+    const secure = new URL(request.url).protocol === 'https:';
+    if (user.email_verified === 1) {
+      // Already verified (e.g. double submit): just log them in.
+      const sess = await createUserSession(env, user.id);
+      return json({ ok: true, alreadyVerified: true, user: userToJson(user) }, 200, {
+        'Set-Cookie': userSessionCookie(sess.token, sess.expiresAt, secure),
+      });
+    }
+    const check = await verifyEmailCode(env, user.id, 'verify', code);
+    if (!check.ok) return error(check.reason, 400);
+    await env.DB.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').bind(user.id).run();
+    const sess = await createUserSession(env, user.id);
+    const fresh = await env.DB.prepare(
+      'SELECT id, username, email, email_verified, disabled, created_at FROM users WHERE id = ?',
+    ).bind(user.id).first();
+    return json({ ok: true, user: userToJson(fresh) }, 200, {
+      'Set-Cookie': userSessionCookie(sess.token, sess.expiresAt, secure),
+    });
+  }
+
+  if (path === '/api/auth/resend-code' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const ev = validateEmail(parsed.body.email);
+    if (!ev.ok) return error(ev.reason, 400);
+    const purpose = parsed.body.purpose === 'reset' ? 'reset' : 'verify';
+    const emailHash = await sha256Hex('resend:' + ev.email);
+    const minOk = await rateLimit(env, `resend-min:${emailHash}`, CONFIG.resendCodeMaxPerMin, 60);
+    if (!minOk) return error('კოდი ახლახან გაიგზავნა — სცადეთ ერთ წუთში.', 429);
+    const hourOk = await rateLimit(env, `resend-hour:${emailHash}`, CONFIG.resendCodeMaxPerHour, 3600);
+    if (!hourOk) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ საათში.', 429);
+    const user = await env.DB.prepare('SELECT id, email_verified FROM users WHERE email = ?').bind(ev.email).first();
+    if (!user) return json({ ok: true }); // do not leak whether the email exists
+    if (purpose === 'verify' && user.email_verified === 1) return json({ ok: true, alreadyVerified: true });
+    const code = await issueEmailCode(env, user.id, ev.email, purpose);
+    const sent = await sendEmailCode(env, ev.email, code, purpose);
+    if (!sent.ok) return json({ ok: false, error: sent.error });
+    return json({ ok: true });
+  }
+
+  if (path === '/api/auth/login' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const loginRaw = parsed.body.login ?? parsed.body.username ?? parsed.body.email;
+    if (typeof loginRaw !== 'string' || !loginRaw.trim()) {
+      return error('მომხმარებლის სახელი ან მეილი შეიყვანეთ.', 400);
+    }
+    const login = loginRaw.trim();
+    const password = parsed.body.password;
+    if (typeof password !== 'string' || !password) return error('პაროლი შეიყვანეთ.', 400);
+    const ipH = await ipHash(request, env);
+    const loginKey = await sha256Hex(login.toLowerCase() + '|' + ipH);
+    const allowed = await rateLimit(env, `user-login:${loginKey}`, CONFIG.userLoginMaxAttempts, CONFIG.userLoginWindowSec);
+    if (!allowed) return error('ძალიან ბევრი მცდელობა. სცადეთ 10 წუთში.', 429);
+    const user = await env.DB.prepare(
+      'SELECT id, username, email, password_hash, email_verified, disabled, created_at ' +
+      'FROM users WHERE username = ? OR email = ?',
+    ).bind(login, login.toLowerCase()).first();
+    if (!user) return error('მომხმარებლის სახელი/მეილი ან პაროლი არასწორია.', 401);
+    if (user.disabled === 1) return error('ანგარიში გათიშულია.', 403);
+    const okPass = await verifyPassword(password, user.password_hash);
+    if (!okPass) return error('მომხმარებლის სახელი/მეილი ან პაროლი არასწორია.', 401);
+    if (user.email_verified !== 1) {
+      return json({ error: 'email_not_verified', email: user.email }, 403);
+    }
+    const sess = await createUserSession(env, user.id);
+    const secure = new URL(request.url).protocol === 'https:';
+    return json({ ok: true, user: userToJson(user) }, 200, {
+      'Set-Cookie': userSessionCookie(sess.token, sess.expiresAt, secure),
+    });
+  }
+
+  if (path === '/api/auth/logout' && method === 'POST') {
+    await destroyUserSession(env, request);
+    const secure = new URL(request.url).protocol === 'https:';
+    return json({ ok: true }, 200, {
+      'Set-Cookie': `user_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure ? '; Secure' : ''}`,
+    });
+  }
+
+  if (path === '/api/auth/me' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const user = await env.DB.prepare(
+      'SELECT id, username, email, email_verified, disabled, created_at FROM users WHERE id = ?',
+    ).bind(userSession.userId).first();
+    if (!user) return error('შესვლა საჭიროა.', 401);
+    return json({ user: userToJson(user) });
+  }
+
+  if (path === '/api/auth/forgot-password' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const ev = validateEmail(parsed.body.email);
+    if (!ev.ok) return error(ev.reason, 400);
+    const emailHash = await sha256Hex('forgot:' + ev.email);
+    const emailOk = await rateLimit(env, `forgot-email:${emailHash}`, CONFIG.forgotMaxPerHourEmail, 3600);
+    const ipOk = await checkRateLimit(request, env, 'forgot-ip', CONFIG.forgotMaxPerHourIp, 3600);
+    if (!emailOk || !ipOk) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ საათში.', 429);
+    const user = await env.DB.prepare('SELECT id, disabled FROM users WHERE email = ?').bind(ev.email).first();
+    // Always respond success — never reveal whether the email exists.
+    if (user && user.disabled !== 1) {
+      const code = await issueEmailCode(env, user.id, ev.email, 'reset');
+      await sendEmailCode(env, ev.email, code, 'reset');
+    }
+    return json({ ok: true });
+  }
+
+  if (path === '/api/auth/reset-password' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const rateOk = await checkRateLimit(request, env, 'reset', 10, 60);
+    if (!rateOk) return error('ძალიან ბევრი მცდელობა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const ev = validateEmail(parsed.body.email);
+    if (!ev.ok) return error(ev.reason, 400);
+    const code = String(parsed.body.code || '').trim();
+    if (!/^\d{6}$/.test(code)) return error('კოდი 6 ციფრისგან უნდა შედგებოდეს.', 400);
+    const pv = validateUserPassword(parsed.body.new_password);
+    if (!pv.ok) return error(pv.reason, 400);
+    const user = await env.DB.prepare('SELECT id, disabled FROM users WHERE email = ?').bind(ev.email).first();
+    if (!user) return error('კოდი არასწორია ან ვადა გავიდა.', 400);
+    if (user.disabled === 1) return error('ანგარიში გათიშულია.', 403);
+    const check = await verifyEmailCode(env, user.id, 'reset', code);
+    if (!check.ok) return error(check.reason, 400);
+    const passwordHash = await hashPassword(parsed.body.new_password);
+    await env.DB.prepare(
+      'UPDATE users SET password_hash = ?, email_verified = 1 WHERE id = ?',
+    ).bind(passwordHash, user.id).run();
+    // All sessions are invalidated by a password reset; a fresh one is
+    // created so the user stays logged in on this device.
+    await env.DB.prepare('DELETE FROM user_sessions WHERE user_id = ?').bind(user.id).run();
+    const sess = await createUserSession(env, user.id);
+    const secure = new URL(request.url).protocol === 'https:';
+    const fresh = await env.DB.prepare(
+      'SELECT id, username, email, email_verified, disabled, created_at FROM users WHERE id = ?',
+    ).bind(user.id).first();
+    return json({ ok: true, user: userToJson(fresh) }, 200, {
+      'Set-Cookie': userSessionCookie(sess.token, sess.expiresAt, secure),
+    });
+  }
+
+  // --- v2: a user's own links (their space) ---------------------------
+  if (path === '/api/auth/links' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const rows = await env.DB.prepare(
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks ' +
+      'FROM links WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
+    ).bind(userSession.userId, CONFIG.maxLinksList).all();
+    return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
+  }
+
+  const authLinkMatch = path.match(/^\/api\/auth\/links\/(\d+)$/);
+  if (authLinkMatch) {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const id = parseInt(authLinkMatch[1], 10);
+    const own = await env.DB.prepare('SELECT user_id FROM links WHERE id = ?').bind(id).first();
+    if (!own) return error('ბმული არ მოიძებნა.', 404);
+    if (own.user_id !== userSession.userId) return error('ეს ბმული თქვენ არ გეკუთვნით.', 403);
+    if (method === 'PATCH') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      const parsed = await readJson(request);
+      if (!parsed.ok) return error(parsed.reason, 400);
+      const updates = [];
+      const values = [];
+      if (typeof parsed.body.enabled === 'boolean') {
+        updates.push('enabled = ?');
+        values.push(parsed.body.enabled ? 1 : 0);
+      }
+      if ('expiresAt' in parsed.body) {
+        const e = parsed.body.expiresAt;
+        if (e === null || e === '') {
+          updates.push('expires_at = NULL');
+        } else {
+          const n = typeof e === 'number' ? e : Date.parse(e);
+          if (!Number.isFinite(n)) return error('ვადის თარიღი არასწორია.', 400);
+          if (n <= Date.now()) return error('ვადა მომავალში უნდა იყოს.', 400);
+          updates.push('expires_at = ?');
+          values.push(n);
+        }
+      }
+      if (updates.length === 0) return error('შესაცვლელი არაფერია.', 400);
+      values.push(id);
+      const res = await env.DB.prepare(
+        `UPDATE links SET ${updates.join(', ')} WHERE id = ?`,
+      ).bind(...values).run();
+      if (!res.success || (res.meta && res.meta.changes === 0)) {
+        return error('ბმული არ მოიძებნა.', 404);
+      }
+      const row = await env.DB.prepare(
+        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE id = ?',
+      ).bind(id).first();
+      return json({ link: linkRowToJson(request, row) });
+    }
+    if (method === 'DELETE') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
+      if (!res.success || (res.meta && res.meta.changes === 0)) {
+        return error('ბმული არ მოიძებნა.', 404);
+      }
+      return json({ ok: true });
+    }
+    return error('მეთოდი დაუშვებელია.', 405);
   }
 
   // --- Everything below requires a session ---------------------------
@@ -642,20 +1257,23 @@ async function handleApi(request, env, url) {
   if (!apiOk) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
 
   // --- List links ------------------------------------------------------
+  // v2: each row also carries its owner (username, or null = anonymous).
   if (path === '/api/links' && method === 'GET') {
     const search = (url.searchParams.get('search') || '').trim();
     let rows;
     if (search) {
       const like = '%' + search.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
       rows = await env.DB.prepare(
-        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks ' +
-        'FROM links WHERE alias LIKE ? ESCAPE \'\\\' OR destination LIKE ? ESCAPE \'\\\' ' +
-        'ORDER BY created_at DESC LIMIT ?',
+        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, u.username AS owner ' +
+        'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
+        'WHERE l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' ' +
+        'ORDER BY l.created_at DESC LIMIT ?',
       ).bind(like, like, CONFIG.maxLinksList).all();
     } else {
       rows = await env.DB.prepare(
-        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks ' +
-        'FROM links ORDER BY created_at DESC LIMIT ?',
+        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, u.username AS owner ' +
+        'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
+        'ORDER BY l.created_at DESC LIMIT ?',
       ).bind(CONFIG.maxLinksList).all();
     }
     return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
@@ -696,8 +1314,8 @@ async function handleApi(request, env, url) {
       finalAlias = av.alias;
       try {
         const ins = await env.DB.prepare(
-          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks) ' +
-          'VALUES (?, ?, ?, ?, 1, 0)',
+          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id) ' +
+          'VALUES (?, ?, ?, ?, 1, 0, NULL)',
         ).bind(finalAlias, v.url, Date.now(), expiresMs).run();
         if (!ins.success) return error('ბმულის შექმნა ვერ მოხერხდა.', 500);
       } catch (e) {
@@ -816,6 +1434,71 @@ async function handleApi(request, env, url) {
       }
     }
     return json({ inserted, skipped, invalid });
+  }
+
+  // --- Admin: list users -------------------------------------------------
+  // Never returns password hashes. link_count counts the user's own links.
+  if (path === '/api/admin/users' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT u.id, u.username, u.email, u.email_verified, u.disabled, u.created_at, ' +
+      '(SELECT COUNT(*) FROM links WHERE user_id = u.id) AS link_count ' +
+      'FROM users u ORDER BY u.created_at DESC',
+    ).all();
+    return json({
+      users: (rows.results || []).map((r) => ({
+        id: r.id,
+        username: r.username,
+        email: r.email,
+        emailVerified: r.email_verified === 1,
+        disabled: r.disabled === 1,
+        createdAt: r.created_at,
+        linkCount: r.link_count,
+      })),
+    });
+  }
+
+  // --- Admin: disable/enable or delete one user --------------------------
+  const adminUserMatch = path.match(/^\/api\/admin\/users\/(\d+)$/);
+  if (adminUserMatch) {
+    const userId = parseInt(adminUserMatch[1], 10);
+    if (method === 'PATCH') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      const parsed = await readJson(request);
+      if (!parsed.ok) return error(parsed.reason, 400);
+      if (typeof parsed.body.disabled !== 'boolean') {
+        return error('ველის "disabled" მნიშვნელობა true ან false უნდა იყოს.', 400);
+      }
+      const disabled = parsed.body.disabled ? 1 : 0;
+      const res = await env.DB.prepare(
+        'UPDATE users SET disabled = ? WHERE id = ?',
+      ).bind(disabled, userId).run();
+      if (!res.success || (res.meta && res.meta.changes === 0)) {
+        return error('მომხმარებელი არ მოიძებნა.', 404);
+      }
+      if (disabled === 1) {
+        // A disabled user is logged out everywhere immediately.
+        await env.DB.prepare('DELETE FROM user_sessions WHERE user_id = ?').bind(userId).run();
+      }
+      const row = await env.DB.prepare(
+        'SELECT id, username, email, email_verified, disabled, created_at FROM users WHERE id = ?',
+      ).bind(userId).first();
+      return json({ user: userToJson(row) });
+    }
+    if (method === 'DELETE') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      const exists = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first();
+      if (!exists) return error('მომხმარებელი არ მოიძებნა.', 404);
+      // The user's short links become anonymous and KEEP redirecting —
+      // deleting a user must never break links already shared.
+      const anon = await env.DB.prepare(
+        'UPDATE links SET user_id = NULL WHERE user_id = ?',
+      ).bind(userId).run();
+      await env.DB.prepare('DELETE FROM user_sessions WHERE user_id = ?').bind(userId).run();
+      await env.DB.prepare('DELETE FROM email_codes WHERE user_id = ?').bind(userId).run();
+      await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
+      return json({ ok: true, linksAnonymized: (anon.meta && anon.meta.changes) || 0 });
+    }
+    return error('მეთოდი დაუშვებელია.', 405);
   }
 
   return error('არ მოიძებნა.', 404);

@@ -91,7 +91,7 @@ async function checkAuth() {
 function setAuthed(yes) {
   loginView.hidden = yes;
   appView.hidden = !yes;
-  if (yes) loadLinks();
+  if (yes) { loadLinks(); loadUsers(); }
 }
 
 $('login-form').addEventListener('submit', async (e) => {
@@ -182,7 +182,7 @@ function linkCard(link) {
 
   const meta = document.createElement('p');
   meta.className = 'link-meta';
-  meta.textContent = `👁 ${link.clicks} გახსნა · შექმნილია: ${fmtDate(link.createdAt)} · ვადა: ${fmtExpiry(link.expiresAt)}`;
+  meta.textContent = `👁 ${link.clicks} გახსნა · 👤 ${link.owner || 'ანონიმური'} · შექმნილია: ${fmtDate(link.createdAt)} · ვადა: ${fmtExpiry(link.expiresAt)}`;
   card.appendChild(meta);
 
   const actions = document.createElement('div');
@@ -240,6 +240,97 @@ $('search-input').addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(loadLinks, 350);
 });
+
+/* ---------------- Users (v2) ---------------- */
+
+let users = [];
+
+async function loadUsers() {
+  const err = $('users-error');
+  hideError(err);
+  try {
+    const data = await api('/api/admin/users');
+    users = data.users || [];
+    renderUsers();
+  } catch (e) {
+    showError(err, e.message || 'მომხმარებლების ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function renderUsers() {
+  const list = $('users-list');
+  list.innerHTML = '';
+  $('users-empty').hidden = users.length !== 0;
+  for (const user of users) {
+    list.appendChild(userCard(user));
+  }
+}
+
+function userCard(user) {
+  const card = document.createElement('div');
+  card.className = 'link-card' + (user.disabled ? ' disabled' : '');
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const name = document.createElement('span');
+  name.className = 'link-alias';
+  name.textContent = user.username;
+  top.appendChild(name);
+
+  const badge = document.createElement('span');
+  if (user.disabled) { badge.className = 'badge off'; badge.textContent = 'გათიშული'; }
+  else if (!user.emailVerified) { badge.className = 'badge expired'; badge.textContent = 'მეილი არ დასტურდება'; }
+  else { badge.className = 'badge on'; badge.textContent = 'აქტიური'; }
+  top.appendChild(badge);
+  card.appendChild(top);
+
+  const dest = document.createElement('p');
+  dest.className = 'link-dest';
+  dest.textContent = user.email;
+  card.appendChild(dest);
+
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = `🔗 ${user.linkCount} ბმული · რეგისტრირებულია: ${fmtDate(user.createdAt)}`;
+  card.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'link-actions';
+
+  const toggleBtn = document.createElement('button');
+  toggleBtn.className = 'btn small';
+  toggleBtn.textContent = user.disabled ? 'ჩართვა' : 'გათიშვა';
+  toggleBtn.addEventListener('click', async () => {
+    const verb = user.disabled ? 'ჩართო' : 'გათიშო';
+    if (!window.confirm(`ნამდვილად გინდა მომხმარებელი „${user.username}" ${verb}?`)) return;
+    try {
+      await api('/api/admin/users/' + user.id, {
+        method: 'PATCH',
+        body: JSON.stringify({ disabled: !user.disabled }),
+      });
+      toast(user.disabled ? 'მომხმარებელი ჩართულია' : 'მომხმარებელი გათიშულია');
+      loadUsers();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(toggleBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn small danger';
+  delBtn.textContent = 'წაშლა';
+  delBtn.addEventListener('click', async () => {
+    if (!window.confirm(`ნამდვილად წავშალო მომხმარებელი „${user.username}"? მისი ბმულები ანონიმური გახდება, მაგრამ მუშაობას გააგრძელებს.`)) return;
+    try {
+      const data = await api('/api/admin/users/' + user.id, { method: 'DELETE' });
+      toast(`მომხმარებელი წაიშალა (${data.linksAnonymized || 0} ბმული ანონიმური გახდა)`);
+      loadUsers();
+      loadLinks();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(delBtn);
+
+  card.appendChild(actions);
+  return card;
+}
 
 /* ---------------- Create link ---------------- */
 

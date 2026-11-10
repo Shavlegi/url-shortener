@@ -14,6 +14,103 @@
     <p class="subtitle">მოკლე ბმულები &bull; QR კოდები &bull; სტატისტიკა</p>
   </header>
 
+  <!-- Accounts are voluntary: the form below works without any login.
+       Logged-in users get their links saved in "ჩემი ბმულები". -->
+  <div class="auth-bar">
+    <span id="auth-logged-out">
+      <button id="login-open-btn" class="btn small">შესვლა</button>
+      <button id="register-open-btn" class="btn small">რეგისტრაცია</button>
+    </span>
+    <span id="auth-logged-in" hidden>
+      <span>👋 <strong id="user-name"></strong></span>
+      <button id="user-logout-btn" class="btn small">გასვლა</button>
+    </span>
+  </div>
+
+  <!-- Auth forms (login / register / verify / forgot / reset) -->
+  <section id="auth-card" class="card" hidden>
+    <!-- Login -->
+    <form id="form-login" hidden>
+      <h2>შესვლა</h2>
+      <label class="field">
+        <span>მომხმარებლის სახელი ან მეილი</span>
+        <input id="login-id" type="text" autocomplete="username" required placeholder="მაგ. shao ან shao@example.com">
+      </label>
+      <label class="field">
+        <span>პაროლი</span>
+        <input id="login-pass" type="password" autocomplete="current-password" required placeholder="პაროლი">
+      </label>
+      <button type="submit" class="btn primary" id="login-submit-btn">შესვლა</button>
+      <p id="login-auth-error" class="error" hidden></p>
+      <p class="auth-switch">
+        <button type="button" class="btn link" id="to-forgot-btn">პაროლი დამავიწყდა</button>
+        &bull; <button type="button" class="btn link" id="to-register-btn">რეგისტრაცია</button>
+      </p>
+    </form>
+    <!-- Register -->
+    <form id="form-register" hidden>
+      <h2>რეგისტრაცია</h2>
+      <p class="muted">რეგისტრაცია ნებაყოფლობითია — ბმულის დამოკლება ანგარიშის გარეშეც შეგიძლიათ. რეგისტრირებული მომხმარებლის ბმულები მის სივრცეში ინახება.</p>
+      <label class="field">
+        <span>მომხმარებლის სახელი</span>
+        <input id="reg-username" type="text" autocomplete="username" required placeholder="3–20 სიმბოლო: ასოები, ციფრები, _" maxlength="20">
+      </label>
+      <label class="field">
+        <span>მეილი</span>
+        <input id="reg-email" type="email" autocomplete="email" required placeholder="you@example.com">
+      </label>
+      <label class="field">
+        <span>პაროლი</span>
+        <input id="reg-password" type="password" autocomplete="new-password" required placeholder="მინიმუმ 8 სიმბოლო">
+      </label>
+      <button type="submit" class="btn primary" id="register-submit-btn">რეგისტრაცია</button>
+      <p id="register-error" class="error" hidden></p>
+      <p class="auth-switch">უკვე გაქვთ ანგარიში? <button type="button" class="btn link" id="to-login-btn">შესვლა</button></p>
+    </form>
+    <!-- Email verification -->
+    <form id="form-verify" hidden>
+      <h2>მეილის დადასტურება</h2>
+      <p class="muted">6-ნიშნა კოდი გაიგზავნა მისამართზე <strong id="verify-email-label"></strong>. კოდი 10 წუთით ვარგისია.</p>
+      <label class="field">
+        <span>კოდი</span>
+        <input id="verify-code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="6">
+      </label>
+      <button type="submit" class="btn primary" id="verify-submit-btn">დადასტურება</button>
+      <p id="verify-error" class="error" hidden></p>
+      <p id="verify-mail-warning" class="error" hidden></p>
+      <p class="auth-switch"><button type="button" class="btn link" id="resend-code-btn">კოდის ხელახლა გაგზავნა</button></p>
+    </form>
+    <!-- Forgot password -->
+    <form id="form-forgot" hidden>
+      <h2>პაროლის აღდგენა</h2>
+      <p class="muted">შეიყვანეთ თქვენი მეილი — 6-ნიშნა კოდი გაიგზავნება.</p>
+      <label class="field">
+        <span>მეილი</span>
+        <input id="forgot-email" type="email" autocomplete="email" required placeholder="you@example.com">
+      </label>
+      <button type="submit" class="btn primary" id="forgot-submit-btn">კოდის გაგზავნა</button>
+      <p id="forgot-error" class="error" hidden></p>
+      <p class="auth-switch"><button type="button" class="btn link" id="to-login-btn2">შესვლაზე დაბრუნება</button></p>
+    </form>
+    <!-- Reset password -->
+    <form id="form-reset" hidden>
+      <h2>ახალი პაროლი</h2>
+      <p class="muted">კოდი გაიგზავნა მისამართზე <strong id="reset-email-label"></strong>. შეიყვანეთ კოდი და ახალი პაროლი.</p>
+      <label class="field">
+        <span>კოდი</span>
+        <input id="reset-code" type="text" inputmode="numeric" autocomplete="one-time-code" required placeholder="123456" maxlength="6">
+      </label>
+      <label class="field">
+        <span>ახალი პაროლი</span>
+        <input id="reset-password" type="password" autocomplete="new-password" required placeholder="მინიმუმ 8 სიმბოლო">
+      </label>
+      <button type="submit" class="btn primary" id="reset-submit-btn">პაროლის შეცვლა</button>
+      <p id="reset-error" class="error" hidden></p>
+      <p class="auth-switch"><button type="button" class="btn link" id="resend-reset-code-btn">კოდის ხელახლა გაგზავნა</button></p>
+    </form>
+    <p><button type="button" class="btn" id="auth-close-btn">დახურვა</button></p>
+  </section>
+
   <section class="card">
     <h2>ბმულის დამოკლება</h2>
     <p class="muted">გრძელი ბმული ჩასვით და მიიღეთ მოკლე ბმული — უფასოდ, რეგისტრაციის გარეშე.</p>
@@ -33,6 +130,18 @@
         <button id="result-qr" class="btn">QR კოდი</button>
       </div>
     </div>
+  </section>
+
+  <!-- My links (only when logged in) -->
+  <section id="my-links-card" class="card" hidden>
+    <h2>ჩემი ბმულები</h2>
+    <label class="field">
+      <span class="sr-only">ძებნა</span>
+      <input id="my-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან ბმული…">
+    </label>
+    <p id="my-links-empty" class="muted" hidden>ბმულები ჯერ არ გაქვთ — ზემოთ დაამოკლეთ პირველი ბმული.</p>
+    <div id="my-links-list" class="links-list"></div>
+    <p id="my-links-error" class="error" hidden></p>
   </section>
 
   <section class="card">
@@ -60,5 +169,6 @@
 </main>
 <script src="/qrcode.min.js"></script>
 <script src="/public.js"></script>
+<script src="/auth.js"></script>
 </body>
 </html>
