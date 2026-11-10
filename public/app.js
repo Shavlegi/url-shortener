@@ -257,14 +257,31 @@ async function loadUsers() {
   }
 }
 
+function filteredUsers() {
+  const q = ($('user-search-input').value || '').trim().toLowerCase();
+  if (!q) return users;
+  return users.filter((u) =>
+    (u.username || '').toLowerCase().includes(q) ||
+    (u.email || '').toLowerCase().includes(q));
+}
+
 function renderUsers() {
   const list = $('users-list');
   list.innerHTML = '';
-  $('users-empty').hidden = users.length !== 0;
-  for (const user of users) {
+  const shown = filteredUsers();
+  const q = ($('user-search-input').value || '').trim();
+  $('users-empty').hidden = shown.length !== 0;
+  $('users-empty').textContent = q
+    ? 'მომხმარებელი ვერ მოიძებნა.'
+    : 'მომხმარებლები ჯერ არ არიან.';
+  for (const user of shown) {
     list.appendChild(userCard(user));
   }
 }
+
+// Live search: every keystroke filters the already-loaded users
+// (username or email, case-insensitive substring) — no Enter, no reload.
+$('user-search-input').addEventListener('input', renderUsers);
 
 function userCard(user) {
   const card = document.createElement('div');
