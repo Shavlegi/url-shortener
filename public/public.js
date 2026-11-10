@@ -71,6 +71,76 @@ try {
   applyTheme(localStorage.getItem('minilink-theme') || 'white');
 } catch { applyTheme('white'); }
 
+/* ---------------- Share buttons ---------------- */
+// One-tap share of a short link: WhatsApp / Telegram / Facebook open in
+// a new tab; the native "გაზიარება" button opens the phone's share sheet
+// (only shown where navigator.share exists). Shared with auth.js.
+function shareButtons(link) {
+  const wrap = document.createElement('div');
+  wrap.className = 'link-actions';
+  const u = encodeURIComponent(link.shortUrl);
+  const mk = (label, href) => {
+    const a = document.createElement('a');
+    a.className = 'btn small';
+    a.textContent = label;
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    wrap.appendChild(a);
+  };
+  mk('WhatsApp', 'https://wa.me/?text=' + u);
+  mk('Telegram', 'https://t.me/share/url?url=' + u + '&text=' + encodeURIComponent('Mini Link'));
+  mk('Facebook', 'https://www.facebook.com/sharer/sharer.php?u=' + u);
+  if (typeof navigator !== 'undefined' && navigator.share) {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = 'გაზიარება';
+    b.addEventListener('click', async () => {
+      try {
+        await navigator.share({ title: 'Mini Link', text: link.shortUrl, url: link.shortUrl });
+      } catch (e) {
+        if (e && e.name !== 'AbortError') toast('გაზიარება ვერ მოხერხდა');
+      }
+    });
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+/* ---------------- Turnstile (bot check, public form only) ------------- */
+// Renders only when a site key is configured (window.MINILINK_TURNSTILE_SITEKEY,
+// set by the inline script in index.html; empty = Turnstile off, the form
+// works exactly as before). The token is sent with the shorten request;
+// the server verifies it only when TURNSTILE_SECRET_KEY is set.
+let turnstileToken = null;
+let turnstileWidgetId = null;
+
+function loadTurnstile() {
+  const sitekey = window.MINILINK_TURNSTILE_SITEKEY || '';
+  if (!sitekey) return;
+  const host = $('turnstile-widget');
+  if (!host) return;
+  const script = document.createElement('script');
+  script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+  script.async = true;
+  script.defer = true;
+  script.onload = () => {
+    try {
+      turnstileWidgetId = window.turnstile.render(host, {
+        sitekey,
+        callback: (token) => { turnstileToken = token; },
+        'expired-callback': () => {
+          turnstileToken = null;
+          if (window.turnstile && turnstileWidgetId !== null) window.turnstile.reset(turnstileWidgetId);
+        },
+      });
+    } catch { /* widget failed to render — the form still works */ }
+  };
+  document.head.appendChild(script);
+}
+
+loadTurnstile();
+
 /* ---------------- Shorten ---------------- */
 
 $('shorten-form').addEventListener('submit', async (e) => {
@@ -83,11 +153,15 @@ $('shorten-form').addEventListener('submit', async (e) => {
   btn.disabled = true;
 
   try {
+    const body = { destination: $('dest-input').value.trim() };
+    const note = $('public-note-input').value.trim();
+    if (note) body.note = note;
+    if (turnstileToken) body.turnstileToken = turnstileToken;
     const res = await fetch('/api/public/shorten', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ destination: $('dest-input').value.trim() }),
+      body: JSON.stringify(body),
     });
     let data = null;
     try { data = await res.json(); } catch { /* non-JSON body */ }
@@ -104,7 +178,11 @@ $('shorten-form').addEventListener('submit', async (e) => {
       else toast('კოპირება ვერ მოხერხდა');
     };
     $('result-qr').onclick = () => openQr(link);
+    const shareHost = $('result-share');
+    shareHost.innerHTML = '';
+    shareHost.appendChild(shareButtons(link));
     $('dest-input').value = '';
+    $('public-note-input').value = '';
     toast('ბმული შეიქმნა');
   } catch (e2) {
     showError(err, e2.message || 'ბმულის შექმნა ვერ მოხერხდა.');

@@ -1,0 +1,13 @@
+-- 0004_link_notes.sql — Mini Link v4: optional label (note) per link
+-- Applied with: wrangler d1 migrations apply mini-link-db --remote
+-- (or once, in the Cloudflare dashboard: D1 -> your database -> Console)
+--
+-- NOTE: the Worker ALSO self-applies this schema lazily on its first API
+-- call (see ensureV4Schema in src/index.js: ALTER TABLE + a schema_meta
+-- version flag). That is what applies it on the live database. This file
+-- exists for fresh installs and for the record.
+--
+-- Old links keep NULL in `note` — the Worker treats that as "no note".
+-- The note is a plain label ("CV", "მაღაზია"); it is never part of the
+-- redirect and never sent to any third party.
+ALTER TABLE links ADD COLUMN note TEXT;

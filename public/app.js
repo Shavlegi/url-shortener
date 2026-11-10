@@ -209,9 +209,79 @@ function renderLinks() {
   renderStats();
 }
 
+/* ---------------- Share buttons ---------------- */
+// One-tap share of a short link: WhatsApp / Telegram / Facebook open in
+// a new tab; the native "გაზიარება" button opens the phone's share sheet
+// (only shown where navigator.share exists).
+function shareButtons(link) {
+  const wrap = document.createElement('div');
+  wrap.className = 'link-actions';
+  const u = encodeURIComponent(link.shortUrl);
+  const mk = (label, href) => {
+    const a = document.createElement('a');
+    a.className = 'btn small';
+    a.textContent = label;
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    wrap.appendChild(a);
+  };
+  mk('WhatsApp', 'https://wa.me/?text=' + u);
+  mk('Telegram', 'https://t.me/share/url?url=' + u + '&text=' + encodeURIComponent('Mini Link'));
+  mk('Facebook', 'https://www.facebook.com/sharer/sharer.php?u=' + u);
+  if (typeof navigator !== 'undefined' && navigator.share) {
+    const b = document.createElement('button');
+    b.className = 'btn small';
+    b.textContent = 'გაზიარება';
+    b.addEventListener('click', async () => {
+      try {
+        await navigator.share({ title: 'Mini Link', text: link.shortUrl, url: link.shortUrl });
+      } catch (e) {
+        if (e && e.name !== 'AbortError') toast('გაზიარება ვერ მოხერხდა');
+      }
+    });
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+/* ---------------- Link note (edit modal) ---------------- */
+
+let currentNoteLink = null;
+
+function openNoteModal(link) {
+  currentNoteLink = link;
+  $('note-modal-input').value = link.note || '';
+  $('note-modal').hidden = false;
+}
+
+$('note-modal-save').addEventListener('click', async () => {
+  if (!currentNoteLink) return;
+  try {
+    await api('/api/links/' + currentNoteLink.id, {
+      method: 'PATCH',
+      body: JSON.stringify({ note: $('note-modal-input').value }),
+    });
+    $('note-modal').hidden = true;
+    toast('შენიშვნა შენახულია');
+    loadLinks();
+  } catch (e) { toast(e.message || 'შეცდომა'); }
+});
+$('note-modal-close').addEventListener('click', () => { $('note-modal').hidden = true; });
+$('note-modal').addEventListener('click', (e) => {
+  if (e.target === $('note-modal')) $('note-modal').hidden = true;
+});
+
 function linkCard(link) {
   const card = document.createElement('div');
   card.className = 'link-card' + (link.enabled ? '' : ' disabled');
+
+  if (link.note) {
+    const note = document.createElement('p');
+    note.className = 'link-note';
+    note.textContent = link.note;
+    card.appendChild(note);
+  }
 
   const top = document.createElement('div');
   top.className = 'link-top';
@@ -266,6 +336,12 @@ function linkCard(link) {
   historyBtn.addEventListener('click', () => openHistory(link));
   actions.appendChild(historyBtn);
 
+  const noteBtn = document.createElement('button');
+  noteBtn.className = 'btn small';
+  noteBtn.textContent = '✏️ შენიშვნა';
+  noteBtn.addEventListener('click', () => openNoteModal(link));
+  actions.appendChild(noteBtn);
+
   const toggleBtn = document.createElement('button');
   toggleBtn.className = 'btn small';
   toggleBtn.textContent = link.enabled ? 'გამორთვა' : 'ჩართვა';
@@ -295,6 +371,7 @@ function linkCard(link) {
   actions.appendChild(delBtn);
 
   card.appendChild(actions);
+  card.appendChild(shareButtons(link));
   return card;
 }
 
@@ -472,7 +549,7 @@ function profileLinkRow(link) {
   top.className = 'link-top';
   const alias = document.createElement('span');
   alias.className = 'link-alias';
-  alias.textContent = link.shortUrl.replace(/^https?:\/\//, '');
+  alias.textContent = link.note || link.shortUrl.replace(/^https?:\/\//, '');
   top.appendChild(alias);
   const badge = document.createElement('span');
   badge.className = 'badge ' + (link.enabled ? 'on' : 'off');
@@ -551,7 +628,7 @@ function renderStats() {
       events.push({
         ts: link.createdAt,
         who: link.owner || 'ანონიმური',
-        text: 'ბმული შეიქმნა: ' + link.shortUrl.replace(/^https?:\/\//, '') + ' → ' + link.destination,
+        text: 'ბმული შეიქმნა: ' + (link.note ? link.note + ' — ' : '') + link.shortUrl.replace(/^https?:\/\//, '') + ' → ' + link.destination,
       });
     }
   }
@@ -592,10 +669,10 @@ function renderStats() {
   for (const link of top) {
     const item = document.createElement('div');
     item.className = 'link-card';
-    const alias = document.createElement('span');
-    alias.className = 'link-alias';
-    alias.textContent = link.shortUrl.replace(/^https?:\/\//, '');
-    item.appendChild(alias);
+    const title = document.createElement('span');
+    title.className = 'link-alias';
+    title.textContent = link.note || link.shortUrl.replace(/^https?:\/\//, '');
+    item.appendChild(title);
     const dest = document.createElement('p');
     dest.className = 'link-dest';
     dest.textContent = link.destination;
@@ -615,7 +692,7 @@ function clickRow(click) {
   item.className = 'link-card';
   const alias = document.createElement('span');
   alias.className = 'link-alias';
-  alias.textContent = click.shortUrl.replace(/^https?:\/\//, '');
+  alias.textContent = click.note || click.shortUrl.replace(/^https?:\/\//, '');
   item.appendChild(alias);
   const dest = document.createElement('p');
   dest.className = 'link-dest';
@@ -827,6 +904,7 @@ $('create-form').addEventListener('submit', async (e) => {
 
   const destination = $('dest-input').value.trim();
   const alias = $('alias-input').value.trim();
+  const note = $('note-input').value.trim();
   const expiryDate = $('expiry-input').value; // yyyy-mm-dd or ''
   let expiresAt = null;
   if (expiryDate) {
@@ -837,7 +915,7 @@ $('create-form').addEventListener('submit', async (e) => {
   try {
     const data = await api('/api/links', {
       method: 'POST',
-      body: JSON.stringify({ destination, alias: alias || undefined, expiresAt }),
+      body: JSON.stringify({ destination, alias: alias || undefined, note: note || undefined, expiresAt }),
     });
     const link = data.link;
     const a = $('result-link');
@@ -851,6 +929,7 @@ $('create-form').addEventListener('submit', async (e) => {
     $('result-qr').onclick = () => openQr(link);
     $('dest-input').value = '';
     $('alias-input').value = '';
+    $('note-input').value = '';
     $('expiry-input').value = '';
     $('alias-hint').textContent = '';
     toast('ბმული შეიქმნა');

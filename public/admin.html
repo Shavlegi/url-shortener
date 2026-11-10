@@ -61,6 +61,10 @@
             <input id="expiry-input" type="date">
           </label>
         </div>
+        <label class="field">
+          <span>შენიშვნა <small>(არასავალდებულო)</small></span>
+          <input id="note-input" type="text" autocomplete="off" placeholder="მაგ. CV, მაღაზია" maxlength="100">
+        </label>
         <button type="submit" class="btn primary" id="create-btn">შეამოკლე</button>
         <p id="create-error" class="error" hidden></p>
       </form>
@@ -196,6 +200,21 @@
       <p id="history-empty" class="muted" hidden></p>
       <div class="result-actions">
         <button id="history-close" class="btn small">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Note modal -->
+  <div id="note-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3>შენიშვნა</h3>
+      <label class="field">
+        <span>შენიშვნა <small>(არასავალდებულო — ცარიელი = წაშლა)</small></span>
+        <input id="note-modal-input" type="text" autocomplete="off" maxlength="100" placeholder="მაგ. CV, მაღაზია">
+      </label>
+      <div class="result-actions">
+        <button id="note-modal-save" class="btn primary">შენახვა</button>
+        <button id="note-modal-close" class="btn">დახურვა</button>
       </div>
     </div>
   </div>

@@ -597,6 +597,47 @@ async function ensureV3Schema(env) {
   }
 }
 
+/* ---------------- Lazy v4 schema migration ---------------- */
+
+// Same idempotent pattern as v2 (see ensureV2Schema): applies
+// migrations/0004_link_notes.sql on first use. Adds an optional `note`
+// column (label) to links. Old links keep NULL — treated as "no note".
+let v4SchemaChecked = false;
+
+async function ensureV4Schema(env) {
+  if (v4SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v4_link_notes'",
+    ).first();
+    if (flag && flag.value === '4') {
+      v4SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    // If the column already exists (migration applied twice), SQLite
+    // errors with "duplicate column" — the expected idempotent case.
+    try {
+      await env.DB.prepare('ALTER TABLE links ADD COLUMN note TEXT').run();
+    } catch (e) {
+      if (!String(e && e.message ? e.message : e).includes('duplicate column')) throw e;
+    }
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v4_link_notes', '4')",
+    ).run();
+    v4SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v4 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
 /* ------------------------------------------------------------------ */
@@ -767,14 +808,25 @@ function validateCustomAlias(alias) {
 // Insert a link with an auto-generated alias. Returns the alias, or null
 // when all attempts fail (an extremely unlikely collision streak).
 // userId: the owner (a logged-in user's id) or null for anonymous links.
-async function insertAutoLink(env, destination, expiresMs, userId = null) {
+/* ---------------- Link notes (v4) ---------------- */
+// Optional label per link ("CV", "მაღაზია"), shown as the card title in
+// the lists. Max 100 chars; empty string clears it (stored as NULL).
+function validateNote(raw) {
+  if (raw === undefined || raw === null) return { ok: true, note: null };
+  if (typeof raw !== 'string') return { ok: false, reason: 'შენიშვნა ტექსტი უნდა იყოს.' };
+  const note = raw.trim();
+  if (note.length > 100) return { ok: false, reason: 'შენიშვნა მაქს. 100 სიმბოლო შეიძლება იყოს.' };
+  return { ok: true, note: note === '' ? null : note };
+}
+
+async function insertAutoLink(env, destination, expiresMs, userId = null, note = null) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = generateAlias();
     try {
       const ins = await env.DB.prepare(
-        'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id) ' +
-        'VALUES (?, ?, ?, ?, 1, 0, ?)',
-      ).bind(candidate, destination, Date.now(), expiresMs, userId).run();
+        'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id, note) ' +
+        'VALUES (?, ?, ?, ?, 1, 0, ?, ?)',
+      ).bind(candidate, destination, Date.now(), expiresMs, userId, note).run();
       if (ins.success) return candidate;
     } catch (e) {
       if (!String(e && e.message ? e.message : e).includes('UNIQUE')) throw e;
@@ -819,6 +871,8 @@ function linkRowToJson(request, row) {
     expiresAt: row.expires_at,
     enabled: row.enabled === 1,
     clicks: row.clicks,
+    // Optional label ("CV", "მაღაზია") — '' when the link has none.
+    note: row.note !== undefined && row.note !== null ? row.note : '',
     // Owner username when the query joined users (admin list), otherwise
     // null — anonymous links and queries without the join.
     owner: row.owner !== undefined && row.owner !== null ? row.owner : null,
@@ -960,6 +1014,31 @@ function originAllowed(request) {
   }
 }
 
+/* ---------------- Turnstile (bot check, public form only) ------------- */
+// Cloudflare Turnstile, free tier. Verification runs ONLY when the
+// TURNSTILE_SECRET_KEY secret is set in Cloudflare; without it the
+// public form works exactly as before (no widget, no check). The site
+// key is public and lives in index.html (window.MINILINK_TURNSTILE_SITEKEY).
+// No IP is sent to Cloudflare for verification.
+async function verifyTurnstile(env, token) {
+  const secret = env.TURNSTILE_SECRET_KEY;
+  if (!secret) return true; // not configured — verification skipped
+  if (!token) return false; // configured but the client sent no token
+  try {
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'secret=' + encodeURIComponent(secret) + '&response=' + encodeURIComponent(token),
+    });
+    const data = await res.json().catch(() => null);
+    return !!(data && data.success === true);
+  } catch {
+    // Verification service unreachable — availability first.
+    console.error('Turnstile verification failed (network), allowing request');
+    return true;
+  }
+}
+
 async function handleApi(request, env, url) {
   const path = url.pathname;
   const method = request.method;
@@ -970,6 +1049,8 @@ async function handleApi(request, env, url) {
   await ensureV2Schema(env);
   // v3 schema (click_events) — same lazy pattern, see ensureV3Schema.
   await ensureV3Schema(env);
+  // v4 schema (links.note) — same lazy pattern, see ensureV4Schema.
+  await ensureV4Schema(env);
 
   // --- Public: login -------------------------------------------------
   if (path === '/api/login' && method === 'POST') {
@@ -1007,6 +1088,11 @@ async function handleApi(request, env, url) {
     if (!hourOk) return error('ლიმიტი ამოიწურა — კიდევ ბმულის შექმნა ერთ საათში შეგეძლებათ.', 429);
     const parsed = await readJson(request);
     if (!parsed.ok) return error(parsed.reason, 400);
+    // Turnstile (only when the secret is configured — see verifyTurnstile).
+    const human = await verifyTurnstile(env, parsed.body.turnstileToken);
+    if (!human) return error('დაადასტურეთ, რომ ადამიანი ხართ.', 400);
+    const nv = validateNote(parsed.body.note);
+    if (!nv.ok) return error(nv.reason, 400);
     const v = validateDestination(parsed.body.destination, ownHosts(request));
     if (!v.ok) return error(v.reason, 400);
     // v2: a logged-in user gets the link in their own space; logged-out
@@ -1016,10 +1102,10 @@ async function handleApi(request, env, url) {
       const userSession = await getUserSession(env, request);
       if (userSession) ownerId = userSession.userId;
     } catch { /* session lookup failure -> anonymous, as before */ }
-    const alias = await insertAutoLink(env, v.url, null, ownerId);
+    const alias = await insertAutoLink(env, v.url, null, ownerId, nv.note);
     if (!alias) return error('ბმულის შექმნა ვერ მოხერხდა — სცადეთ ხელახლა.', 500);
     const row = await env.DB.prepare(
-      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE alias = ?',
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note FROM links WHERE alias = ?',
     ).bind(alias).first();
     return json({ link: linkRowToJson(request, row) }, 201);
   }
@@ -1233,7 +1319,7 @@ async function handleApi(request, env, url) {
     const userSession = await getUserSession(env, request);
     if (!userSession) return error('შესვლა საჭიროა.', 401);
     const rows = await env.DB.prepare(
-      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks ' +
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note ' +
       'FROM links WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
     ).bind(userSession.userId, CONFIG.maxLinksList).all();
     return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
@@ -1244,7 +1330,7 @@ async function handleApi(request, env, url) {
     const userSession = await getUserSession(env, request);
     if (!userSession) return error('შესვლა საჭიროა.', 401);
     const rows = await env.DB.prepare(
-      'SELECT c.clicked_at, l.alias, l.destination ' +
+      'SELECT c.clicked_at, l.alias, l.destination, l.note ' +
       'FROM click_events c JOIN links l ON l.id = c.link_id ' +
       'WHERE l.user_id = ? ORDER BY c.clicked_at DESC, c.id DESC LIMIT 20',
     ).bind(userSession.userId).all();
@@ -1254,6 +1340,7 @@ async function handleApi(request, env, url) {
         alias: r.alias,
         shortUrl: publicLink(request, r.alias),
         destination: r.destination,
+        note: r.note !== undefined && r.note !== null ? r.note : '',
       })),
     });
   }
@@ -1305,6 +1392,12 @@ async function handleApi(request, env, url) {
           values.push(n);
         }
       }
+      if ('note' in parsed.body) {
+        const nv = validateNote(parsed.body.note);
+        if (!nv.ok) return error(nv.reason, 400);
+        if (nv.note === null) updates.push('note = NULL');
+        else { updates.push('note = ?'); values.push(nv.note); }
+      }
       if (updates.length === 0) return error('შესაცვლელი არაფერია.', 400);
       values.push(id);
       const res = await env.DB.prepare(
@@ -1314,7 +1407,7 @@ async function handleApi(request, env, url) {
         return error('ბმული არ მოიძებნა.', 404);
       }
       const row = await env.DB.prepare(
-        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE id = ?',
+        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note FROM links WHERE id = ?',
       ).bind(id).first();
       return json({ link: linkRowToJson(request, row) });
     }
@@ -1360,14 +1453,14 @@ async function handleApi(request, env, url) {
     if (search) {
       const like = '%' + search.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
       rows = await env.DB.prepare(
-        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, u.username AS owner ' +
+        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, u.username AS owner ' +
         'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
-        'WHERE l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' ' +
+        'WHERE l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' OR l.note LIKE ? ESCAPE \'\\\' ' +
         'ORDER BY l.created_at DESC LIMIT ?',
-      ).bind(like, like, CONFIG.maxLinksList).all();
+      ).bind(like, like, like, CONFIG.maxLinksList).all();
     } else {
       rows = await env.DB.prepare(
-        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, u.username AS owner ' +
+        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, u.username AS owner ' +
         'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
         'ORDER BY l.created_at DESC LIMIT ?',
       ).bind(CONFIG.maxLinksList).all();
@@ -1394,6 +1487,8 @@ async function handleApi(request, env, url) {
 
     const v = validateDestination(destination, ownHosts(request));
     if (!v.ok) return error(v.reason, 400);
+    const nv = validateNote(parsed.body.note);
+    if (!nv.ok) return error(nv.reason, 400);
 
     let expiresMs = null;
     if (expiresAt !== undefined && expiresAt !== null && expiresAt !== '') {
@@ -1410,9 +1505,9 @@ async function handleApi(request, env, url) {
       finalAlias = av.alias;
       try {
         const ins = await env.DB.prepare(
-          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id) ' +
-          'VALUES (?, ?, ?, ?, 1, 0, NULL)',
-        ).bind(finalAlias, v.url, Date.now(), expiresMs).run();
+          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id, note) ' +
+          'VALUES (?, ?, ?, ?, 1, 0, NULL, ?)',
+        ).bind(finalAlias, v.url, Date.now(), expiresMs, nv.note).run();
         if (!ins.success) return error('ბმულის შექმნა ვერ მოხერხდა.', 500);
       } catch (e) {
         if (String(e && e.message ? e.message : e).includes('UNIQUE')) {
@@ -1421,13 +1516,13 @@ async function handleApi(request, env, url) {
         throw e;
       }
     } else {
-      const inserted = await insertAutoLink(env, v.url, expiresMs);
+      const inserted = await insertAutoLink(env, v.url, expiresMs, null, nv.note);
       if (!inserted) return error('ბმულის შექმნა ვერ მოხერხდა — სცადეთ ხელახლა.', 500);
       finalAlias = inserted;
     }
 
     const row = await env.DB.prepare(
-      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE alias = ?',
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note FROM links WHERE alias = ?',
     ).bind(finalAlias).first();
     return json({ link: linkRowToJson(request, row) }, 201);
   }
@@ -1435,7 +1530,7 @@ async function handleApi(request, env, url) {
   // --- v3: recent clicks across ALL links (admin only) ----------------
   if (path === '/api/clicks/recent' && method === 'GET') {
     const rows = await env.DB.prepare(
-      'SELECT c.clicked_at, l.alias, l.destination ' +
+      'SELECT c.clicked_at, l.alias, l.destination, l.note ' +
       'FROM click_events c JOIN links l ON l.id = c.link_id ' +
       'ORDER BY c.clicked_at DESC, c.id DESC LIMIT 20',
     ).all();
@@ -1445,6 +1540,7 @@ async function handleApi(request, env, url) {
         alias: r.alias,
         shortUrl: publicLink(request, r.alias),
         destination: r.destination,
+        note: r.note !== undefined && r.note !== null ? r.note : '',
       })),
     });
   }
@@ -1489,6 +1585,12 @@ async function handleApi(request, env, url) {
           values.push(n);
         }
       }
+      if ('note' in parsed.body) {
+        const nv = validateNote(parsed.body.note);
+        if (!nv.ok) return error(nv.reason, 400);
+        if (nv.note === null) updates.push('note = NULL');
+        else { updates.push('note = ?'); values.push(nv.note); }
+      }
       if (updates.length === 0) return error('შესაცვლელი არაფერია.', 400);
       values.push(id);
       const res = await env.DB.prepare(
@@ -1498,7 +1600,7 @@ async function handleApi(request, env, url) {
         return error('ბმული არ მოიძებნა.', 404);
       }
       const row = await env.DB.prepare(
-        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE id = ?',
+        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note FROM links WHERE id = ?',
       ).bind(id).first();
       return json({ link: linkRowToJson(request, row) });
     }
@@ -1516,7 +1618,7 @@ async function handleApi(request, env, url) {
   // --- Export all links (backup) -------------------------------------------
   if (path === '/api/export' && method === 'GET') {
     const rows = await env.DB.prepare(
-      'SELECT alias, destination, created_at, expires_at, enabled, clicks FROM links ORDER BY created_at ASC',
+      'SELECT alias, destination, created_at, expires_at, enabled, clicks, note FROM links ORDER BY created_at ASC',
     ).all();
     return json({
       exportedAt: new Date().toISOString(),
@@ -1549,11 +1651,13 @@ async function handleApi(request, env, url) {
       const expiresMs = Number.isFinite(item.expires_at) ? item.expires_at : null;
       const enabled = item.enabled === 0 || item.enabled === false ? 0 : 1;
       const clicks = Number.isFinite(item.clicks) && item.clicks >= 0 ? Math.floor(item.clicks) : 0;
+      const nv = validateNote(item.note);
+      const note = nv.ok ? nv.note : null;
       try {
         const ins = await env.DB.prepare(
-          'INSERT OR IGNORE INTO links (alias, destination, created_at, expires_at, enabled, clicks) ' +
-          'VALUES (?, ?, ?, ?, ?, ?)',
-        ).bind(av.alias, v.url, createdAt, expiresMs, enabled, clicks).run();
+          'INSERT OR IGNORE INTO links (alias, destination, created_at, expires_at, enabled, clicks, note) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ).bind(av.alias, v.url, createdAt, expiresMs, enabled, clicks, note).run();
         if (ins.meta && ins.meta.changes === 1) inserted++;
         else skipped++;
       } catch {

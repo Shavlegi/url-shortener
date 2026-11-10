@@ -178,6 +178,7 @@ body.theme-black .toast, body.theme-blue .toast { background: #ffffff; color: #0
 .link-card.disabled { opacity: 0.65; }
 .link-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .link-alias { font-weight: 700; color: var(--accent); word-break: break-all; }
+.link-note { font-weight: 700; margin: 0 0 2px; word-break: break-word; }
 .badge {
   flex-shrink: 0;
   font-size: 0.8rem; font-weight: 700;

@@ -322,7 +322,7 @@ function renderMyRecentClicks(clicks) {
     item.className = 'link-card';
     const alias = document.createElement('span');
     alias.className = 'link-alias';
-    alias.textContent = click.shortUrl.replace(/^https?:\/\//, '');
+    alias.textContent = click.note || click.shortUrl.replace(/^https?:\/\//, '');
     item.appendChild(alias);
     const dest = document.createElement('p');
     dest.className = 'link-dest';
@@ -386,14 +386,49 @@ function renderMyLinks() {
   const q = el('my-search-input').value.trim().toLowerCase();
   list.innerHTML = '';
   const shown = authMyLinks.filter((l) =>
-    !q || l.alias.toLowerCase().includes(q) || l.destination.toLowerCase().includes(q));
+    !q || l.alias.toLowerCase().includes(q) || l.destination.toLowerCase().includes(q) ||
+    (l.note || '').toLowerCase().includes(q));
   el('my-links-empty').hidden = shown.length !== 0;
   for (const link of shown) list.appendChild(myLinkCard(link));
 }
 
+/* ---------------- Link note (edit modal) ---------------- */
+
+let currentNoteLink = null;
+
+function openMyNoteModal(link) {
+  currentNoteLink = link;
+  el('note-modal-input').value = link.note || '';
+  el('note-modal').hidden = false;
+}
+
+el('note-modal-save').addEventListener('click', async () => {
+  if (!currentNoteLink) return;
+  try {
+    await authApi('/api/auth/links/' + currentNoteLink.id, {
+      method: 'PATCH',
+      body: JSON.stringify({ note: el('note-modal-input').value }),
+    });
+    el('note-modal').hidden = true;
+    toast('შენიშვნა შენახულია');
+    loadMyLinks();
+  } catch (e) { toast(e.message || 'შეცდომა'); }
+});
+el('note-modal-close').addEventListener('click', () => { el('note-modal').hidden = true; });
+el('note-modal').addEventListener('click', (e) => {
+  if (e.target === el('note-modal')) el('note-modal').hidden = true;
+});
+
 function myLinkCard(link) {
   const card = document.createElement('div');
   card.className = 'link-card' + (link.enabled ? '' : ' disabled');
+
+  if (link.note) {
+    const note = document.createElement('p');
+    note.className = 'link-note';
+    note.textContent = link.note;
+    card.appendChild(note);
+  }
 
   const top = document.createElement('div');
   top.className = 'link-top';
@@ -448,6 +483,12 @@ function myLinkCard(link) {
   historyBtn.addEventListener('click', () => openMyHistory(link));
   actions.appendChild(historyBtn);
 
+  const noteBtn = document.createElement('button');
+  noteBtn.className = 'btn small';
+  noteBtn.textContent = '✏️ შენიშვნა';
+  noteBtn.addEventListener('click', () => openMyNoteModal(link));
+  actions.appendChild(noteBtn);
+
   const toggleBtn = document.createElement('button');
   toggleBtn.className = 'btn small';
   toggleBtn.textContent = link.enabled ? 'გამორთვა' : 'ჩართვა';
@@ -477,6 +518,7 @@ function myLinkCard(link) {
   actions.appendChild(delBtn);
 
   card.appendChild(actions);
+  card.appendChild(shareButtons(link));
   return card;
 }
 
