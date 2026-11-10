@@ -477,7 +477,13 @@ async function serveStatic(env, request, pathname) {
     });
   }
   if (env.ASSETS) {
-    const res = await env.ASSETS.fetch(request);
+    // NOTE: fetch the COMPUTED file, not the original request URL — for '/'
+    // the file depends on the hostname (index.html vs admin.html), and the
+    // ASSETS binding serves by request path, so passing the original request
+    // would always serve index.html on every host.
+    const assetUrl = new URL(request.url);
+    assetUrl.pathname = file;
+    const res = await env.ASSETS.fetch(new Request(assetUrl.toString(), request));
     if (res.status === 404) return new Response('Not found', { status: 404 });
     return res;
   }
