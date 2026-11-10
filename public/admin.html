@@ -114,6 +114,12 @@
       </div>
       <p id="activity-empty" class="muted" hidden>ამ პერიოდში აქტივობა არ ყოფილა.</p>
       <div id="activity-list" class="links-list"></div>
+      <h3>ყველაზე პოპულარული ბმულები</h3>
+      <p id="top-links-empty" class="muted" hidden>ბმულები ჯერ არ არის.</p>
+      <div id="top-links-list" class="links-list"></div>
+      <h3>ბოლო გახსნები</h3>
+      <p id="recent-clicks-empty" class="muted" hidden>გახსნები ჯერ არ არის.</p>
+      <div id="recent-clicks-list" class="links-list"></div>
     </section>
 
     <section class="card" id="section-settings" hidden>
@@ -153,6 +159,19 @@
         <button id="profile-toggle-btn" class="btn small">გათიშვა</button>
         <button id="profile-delete-btn" class="btn small danger">წაშლა</button>
         <button id="profile-close" class="btn small">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- History modal -->
+  <div id="history-modal" class="modal" hidden>
+    <div class="modal-box profile-box">
+      <h3 id="history-title">🕘 ისტორია</h3>
+      <p class="link-meta" id="history-count"></p>
+      <div id="history-list" class="links-list"></div>
+      <p id="history-empty" class="muted" hidden></p>
+      <div class="result-actions">
+        <button id="history-close" class="btn small">დახურვა</button>
       </div>
     </div>
   </div>

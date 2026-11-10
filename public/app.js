@@ -144,7 +144,10 @@ function showTab(name) {
     $('section-' + t).hidden = t !== name;
     $('tabbtn-' + t).classList.toggle('active', t === name);
   }
-  if (name === 'stats') renderStats();
+  if (name === 'stats') {
+    renderStats();
+    loadRecentClicks();
+  }
   try { history.replaceState(null, '', '#' + name); } catch { /* ignore */ }
 }
 
@@ -256,6 +259,12 @@ function linkCard(link) {
   qrBtn.textContent = 'QR კოდი';
   qrBtn.addEventListener('click', () => openQr(link));
   actions.appendChild(qrBtn);
+
+  const historyBtn = document.createElement('button');
+  historyBtn.className = 'btn small';
+  historyBtn.textContent = 'ისტორია';
+  historyBtn.addEventListener('click', () => openHistory(link));
+  actions.appendChild(historyBtn);
 
   const toggleBtn = document.createElement('button');
   toggleBtn.className = 'btn small';
@@ -494,8 +503,10 @@ $('profile-modal').addEventListener('click', (e) => {
 
 /* ---------------- Stats + activity ---------------- */
 // Totals + activity feed are computed client-side from the already-loaded
-// links and users — no extra API calls. Clicks have no per-click timestamps,
-// so the feed shows creations and registrations only (who + when).
+// links and users — no extra API calls. The activity feed shows creations
+// and registrations only (who + when). Per-click timestamps DO exist now
+// (v3: click_events, link_id + clicked_at only) — they live in the
+// "ბოლო გახსნები" block and in each link's history modal, loaded on demand.
 
 function periodCutoff() {
   const now = Date.now();
@@ -552,7 +563,111 @@ function renderStats() {
     item.appendChild(meta);
     list.appendChild(item);
   }
+
+  // Most popular links (admin only): top 5 by clicks, ties broken by
+  // newest first. Computed from the already-loaded links — no API call.
+  const top = links.slice().sort((a, b) =>
+    (b.clicks || 0) - (a.clicks || 0) || (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 5);
+  const topList = $('top-links-list');
+  topList.innerHTML = '';
+  $('top-links-empty').hidden = top.length !== 0;
+  for (const link of top) {
+    const item = document.createElement('div');
+    item.className = 'link-card';
+    const alias = document.createElement('span');
+    alias.className = 'link-alias';
+    alias.textContent = link.shortUrl.replace(/^https?:\/\//, '');
+    item.appendChild(alias);
+    const dest = document.createElement('p');
+    dest.className = 'link-dest';
+    dest.textContent = link.destination;
+    item.appendChild(dest);
+    const meta = document.createElement('p');
+    meta.className = 'link-meta';
+    meta.textContent = `👁 ${link.clicks} გახსნა`;
+    item.appendChild(meta);
+    topList.appendChild(item);
+  }
 }
+
+/* ---------------- Click history (v3) ---------------- */
+
+function clickRow(click) {
+  const item = document.createElement('div');
+  item.className = 'link-card';
+  const alias = document.createElement('span');
+  alias.className = 'link-alias';
+  alias.textContent = click.shortUrl.replace(/^https?:\/\//, '');
+  item.appendChild(alias);
+  const dest = document.createElement('p');
+  dest.className = 'link-dest';
+  dest.textContent = click.destination;
+  item.appendChild(dest);
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = fmtDate(click.clickedAt);
+  item.appendChild(meta);
+  return item;
+}
+
+// Recent clicks across all links. Called only when the stats tab is opened
+// (not inside renderStats, which runs on every links/users render).
+async function loadRecentClicks() {
+  const list = $('recent-clicks-list');
+  try {
+    const data = await api('/api/clicks/recent');
+    const clicks = data.clicks || [];
+    list.innerHTML = '';
+    $('recent-clicks-empty').hidden = clicks.length !== 0;
+    for (const click of clicks) list.appendChild(clickRow(click));
+  } catch (e) {
+    $('recent-clicks-empty').hidden = false;
+    $('recent-clicks-empty').textContent = 'გახსნების ჩატვირთვა ვერ მოხერხდა.';
+  }
+}
+
+// Per-link history modal. `events` hold only timestamps (v3) — clicks from
+// before this feature have no timestamp, so the note explains the gap.
+async function openHistory(link) {
+  $('history-title').textContent = '🕘 ' + link.alias;
+  $('history-count').textContent = `👁 ${link.clicks} გახსნა`;
+  $('history-list').innerHTML = '';
+  $('history-empty').hidden = true;
+  $('history-modal').hidden = false;
+  try {
+    const data = await api('/api/links/' + link.id + '/clicks');
+    const events = data.events || [];
+    for (const ev of events) {
+      const item = document.createElement('div');
+      item.className = 'link-card';
+      const txt = document.createElement('p');
+      txt.className = 'link-dest';
+      txt.textContent = 'გახსნილია: ' + fmtDate(ev.clickedAt);
+      item.appendChild(txt);
+      $('history-list').appendChild(item);
+    }
+    const empty = $('history-empty');
+    if (link.clicks === 0) {
+      empty.textContent = 'ამ ბმულს გახსნები ჯერ არ აქვს.';
+      empty.hidden = false;
+    } else if (events.length === 0) {
+      empty.textContent = `ძველი გახსნები (ფუნქციის დამატებამდე) თარიღის გარეშეა — სულ ${link.clicks} გახსნა.`;
+      empty.hidden = false;
+    } else if (link.clicks > events.length) {
+      empty.textContent = `კიდევ ${link.clicks - events.length} ძველი გახსნა თარიღის გარეშეა (ფუნქციის დამატებამდე).`;
+      empty.hidden = false;
+    }
+  } catch (e) {
+    const empty = $('history-empty');
+    empty.textContent = 'ისტორიის ჩატვირთვა ვერ მოხერხდა.';
+    empty.hidden = false;
+  }
+}
+
+$('history-close').addEventListener('click', () => { $('history-modal').hidden = true; });
+$('history-modal').addEventListener('click', (e) => {
+  if (e.target === $('history-modal')) $('history-modal').hidden = true;
+});
 
 const PERIODS = ['today', '7d', '30d', 'all'];
 for (const p of PERIODS) {

@@ -147,6 +147,9 @@
       <span class="sr-only">ძებნა</span>
       <input id="my-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან ბმული…">
     </label>
+    <h3>ბოლო გახსნები</h3>
+    <p id="my-recent-clicks-empty" class="muted" hidden>გახსნები ჯერ არ არის.</p>
+    <div id="my-recent-clicks-list" class="links-list"></div>
     <p id="my-links-empty" class="muted" hidden>ბმულები ჯერ არ გაქვთ — ზემოთ დაამოკლეთ პირველი ბმული.</p>
     <div id="my-links-list" class="links-list"></div>
     <p id="my-links-error" class="error" hidden></p>
@@ -169,6 +172,19 @@
       <div class="result-actions">
         <button id="qr-download" class="btn primary">PNG გადმოწერა</button>
         <button id="qr-close" class="btn">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- History modal -->
+  <div id="history-modal" class="modal" hidden>
+    <div class="modal-box profile-box">
+      <h3 id="history-title">🕘 ისტორია</h3>
+      <p class="link-meta" id="history-count"></p>
+      <div id="history-list" class="links-list"></div>
+      <p id="history-empty" class="muted" hidden></p>
+      <div class="result-actions">
+        <button id="history-close" class="btn small">დახურვა</button>
       </div>
     </div>
   </div>

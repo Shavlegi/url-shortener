@@ -301,7 +301,85 @@ async function loadMyLinks() {
   } catch (e) {
     showError(err, e.message || 'ბმულების ჩატვირთვა ვერ მოხერხდა.');
   }
+  // Recent clicks across the user's own links — a separate call, so a
+  // failure here never breaks the links list above.
+  try {
+    const data = await authApi('/api/auth/clicks/recent');
+    renderMyRecentClicks(data.clicks || []);
+  } catch {
+    el('my-recent-clicks-empty').hidden = false;
+    el('my-recent-clicks-empty').textContent = 'გახსნების ჩატვირთვა ვერ მოხერხდა.';
+  }
 }
+
+function renderMyRecentClicks(clicks) {
+  const list = el('my-recent-clicks-list');
+  list.innerHTML = '';
+  el('my-recent-clicks-empty').hidden = clicks.length !== 0;
+  if (clicks.length === 0) el('my-recent-clicks-empty').textContent = 'გახსნები ჯერ არ არის.';
+  for (const click of clicks) {
+    const item = document.createElement('div');
+    item.className = 'link-card';
+    const alias = document.createElement('span');
+    alias.className = 'link-alias';
+    alias.textContent = click.shortUrl.replace(/^https?:\/\//, '');
+    item.appendChild(alias);
+    const dest = document.createElement('p');
+    dest.className = 'link-dest';
+    dest.textContent = click.destination;
+    item.appendChild(dest);
+    const meta = document.createElement('p');
+    meta.className = 'link-meta';
+    meta.textContent = fmtDate(click.clickedAt);
+    item.appendChild(meta);
+    list.appendChild(item);
+  }
+}
+
+/* ---------------- Click history (v3) ---------------- */
+
+// Per-link history modal. `events` hold only timestamps (v3) — clicks from
+// before this feature have no timestamp, so the note explains the gap.
+async function openMyHistory(link) {
+  el('history-title').textContent = '🕘 ' + link.alias;
+  el('history-count').textContent = `👁 ${link.clicks} გახსნა`;
+  el('history-list').innerHTML = '';
+  el('history-empty').hidden = true;
+  el('history-modal').hidden = false;
+  try {
+    const data = await authApi('/api/auth/links/' + link.id + '/clicks');
+    const events = data.events || [];
+    for (const ev of events) {
+      const item = document.createElement('div');
+      item.className = 'link-card';
+      const txt = document.createElement('p');
+      txt.className = 'link-dest';
+      txt.textContent = 'გახსნილია: ' + fmtDate(ev.clickedAt);
+      item.appendChild(txt);
+      el('history-list').appendChild(item);
+    }
+    const empty = el('history-empty');
+    if (link.clicks === 0) {
+      empty.textContent = 'ამ ბმულს გახსნები ჯერ არ აქვს.';
+      empty.hidden = false;
+    } else if (events.length === 0) {
+      empty.textContent = `ძველი გახსნები (ფუნქციის დამატებამდე) თარიღის გარეშეა — სულ ${link.clicks} გახსნა.`;
+      empty.hidden = false;
+    } else if (link.clicks > events.length) {
+      empty.textContent = `კიდევ ${link.clicks - events.length} ძველი გახსნა თარიღის გარეშეა (ფუნქციის დამატებამდე).`;
+      empty.hidden = false;
+    }
+  } catch (e) {
+    const empty = el('history-empty');
+    empty.textContent = 'ისტორიის ჩატვირთვა ვერ მოხერხდა.';
+    empty.hidden = false;
+  }
+}
+
+el('history-close').addEventListener('click', () => { el('history-modal').hidden = true; });
+el('history-modal').addEventListener('click', (e) => {
+  if (e.target === el('history-modal')) el('history-modal').hidden = true;
+});
 
 function renderMyLinks() {
   const list = el('my-links-list');
@@ -363,6 +441,12 @@ function myLinkCard(link) {
   qrBtn.textContent = 'QR კოდი';
   qrBtn.addEventListener('click', () => openQr(link));
   actions.appendChild(qrBtn);
+
+  const historyBtn = document.createElement('button');
+  historyBtn.className = 'btn small';
+  historyBtn.textContent = 'ისტორია';
+  historyBtn.addEventListener('click', () => openMyHistory(link));
+  actions.appendChild(historyBtn);
 
   const toggleBtn = document.createElement('button');
   toggleBtn.className = 'btn small';

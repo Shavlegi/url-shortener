@@ -551,6 +551,52 @@ async function ensureV2Schema(env) {
   }
 }
 
+/* ---------------- Lazy v3 schema migration ---------------- */
+
+// Same idempotent pattern as v2 (see ensureV2Schema): applies
+// migrations/0003_click_events.sql on first use. The click_events table
+// stores ONLY (link_id, clicked_at) — no IP, no User-Agent, no referrer,
+// no country. Each link keeps at most its newest 100 events (pruned on
+// every counted click in handleRedirect).
+let v3SchemaChecked = false;
+
+async function ensureV3Schema(env) {
+  if (v3SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v3_click_events'",
+    ).first();
+    if (flag && flag.value === '3') {
+      v3SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+      ),
+      env.DB.prepare(
+        'CREATE TABLE IF NOT EXISTS click_events (' +
+        'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+        'link_id INTEGER NOT NULL, ' +
+        'clicked_at INTEGER NOT NULL)',
+      ),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_click_events_link ON click_events (link_id, clicked_at DESC)'),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_click_events_time ON click_events (clicked_at)'),
+    ]);
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v3_click_events', '3')",
+    ).run();
+    v3SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v3 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
 /* ------------------------------------------------------------------ */
@@ -849,7 +895,7 @@ async function handleRedirect(request, env, alias) {
   const url = new URL(request.url);
   const now = Date.now();
   const row = await env.DB.prepare(
-    'SELECT destination, enabled, expires_at FROM links WHERE alias = ?',
+    'SELECT id, destination, enabled, expires_at FROM links WHERE alias = ?',
   ).bind(alias).first();
   if (!row) return new Response('ბმული არ მოიძებნა.', { status: 404 });
   if (row.enabled !== 1) return new Response('ბმული გამორთულია.', { status: 410 });
@@ -859,11 +905,23 @@ async function handleRedirect(request, env, alias) {
 
   // Count the click atomically (single UPDATE). Bot visits redirect but are
   // not counted. If counting fails, still redirect — availability first.
+  // For non-bot clicks, also record a click event (link_id + timestamp
+  // ONLY — no IP, no User-Agent, nothing else) and prune each link to its
+  // newest 100 events, so the table cannot grow forever.
   if (!isBot(request.headers.get('User-Agent'))) {
     try {
-      await env.DB.prepare(
-        'UPDATE links SET clicks = clicks + 1 WHERE alias = ?',
-      ).bind(alias).run();
+      await ensureV3Schema(env);
+      await env.DB.batch([
+        env.DB.prepare('UPDATE links SET clicks = clicks + 1 WHERE alias = ?').bind(alias),
+        env.DB.prepare(
+          'INSERT INTO click_events (link_id, clicked_at) VALUES (?, ?)',
+        ).bind(row.id, now),
+        env.DB.prepare(
+          'DELETE FROM click_events WHERE link_id = ? AND id NOT IN (' +
+          'SELECT id FROM click_events WHERE link_id = ? ' +
+          'ORDER BY clicked_at DESC, id DESC LIMIT 100)',
+        ).bind(row.id, row.id),
+      ]);
     } catch (e) {
       console.error('click increment failed:', e && e.message ? e.message : e);
     }
@@ -910,6 +968,8 @@ async function handleApi(request, env, url) {
   // lazily on first use — see ensureV2Schema. After the first successful
   // run this is a single cached check (no extra query on warm isolates).
   await ensureV2Schema(env);
+  // v3 schema (click_events) — same lazy pattern, see ensureV3Schema.
+  await ensureV3Schema(env);
 
   // --- Public: login -------------------------------------------------
   if (path === '/api/login' && method === 'POST') {
@@ -1179,6 +1239,42 @@ async function handleApi(request, env, url) {
     return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
   }
 
+  // --- v3: a user's own recent clicks (their links only) --------------
+  if (path === '/api/auth/clicks/recent' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const rows = await env.DB.prepare(
+      'SELECT c.clicked_at, l.alias, l.destination ' +
+      'FROM click_events c JOIN links l ON l.id = c.link_id ' +
+      'WHERE l.user_id = ? ORDER BY c.clicked_at DESC, c.id DESC LIMIT 20',
+    ).bind(userSession.userId).all();
+    return json({
+      clicks: (rows.results || []).map((r) => ({
+        clickedAt: r.clicked_at,
+        alias: r.alias,
+        shortUrl: publicLink(request, r.alias),
+        destination: r.destination,
+      })),
+    });
+  }
+
+  // --- v3: click history of one of the user's own links ---------------
+  const authLinkClicksMatch = path.match(/^\/api\/auth\/links\/(\d+)\/clicks$/);
+  if (authLinkClicksMatch) {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const id = parseInt(authLinkClicksMatch[1], 10);
+    const own = await env.DB.prepare('SELECT user_id FROM links WHERE id = ?').bind(id).first();
+    if (!own) return error('ბმული არ მოიძებნა.', 404);
+    if (own.user_id !== userSession.userId) return error('ეს ბმული თქვენ არ გეკუთვნით.', 403);
+    if (method !== 'GET') return error('მეთოდი დაუშვებელია.', 405);
+    const rows = await env.DB.prepare(
+      'SELECT clicked_at FROM click_events WHERE link_id = ? ' +
+      'ORDER BY clicked_at DESC, id DESC LIMIT 50',
+    ).bind(id).all();
+    return json({ events: (rows.results || []).map((r) => ({ clickedAt: r.clicked_at })) });
+  }
+
   const authLinkMatch = path.match(/^\/api\/auth\/links\/(\d+)$/);
   if (authLinkMatch) {
     const userSession = await getUserSession(env, request);
@@ -1334,6 +1430,37 @@ async function handleApi(request, env, url) {
       'SELECT id, alias, destination, created_at, expires_at, enabled, clicks FROM links WHERE alias = ?',
     ).bind(finalAlias).first();
     return json({ link: linkRowToJson(request, row) }, 201);
+  }
+
+  // --- v3: recent clicks across ALL links (admin only) ----------------
+  if (path === '/api/clicks/recent' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT c.clicked_at, l.alias, l.destination ' +
+      'FROM click_events c JOIN links l ON l.id = c.link_id ' +
+      'ORDER BY c.clicked_at DESC, c.id DESC LIMIT 20',
+    ).all();
+    return json({
+      clicks: (rows.results || []).map((r) => ({
+        clickedAt: r.clicked_at,
+        alias: r.alias,
+        shortUrl: publicLink(request, r.alias),
+        destination: r.destination,
+      })),
+    });
+  }
+
+  // --- v3: click history of one link (admin only) ----------------------
+  const linkClicksMatch = path.match(/^\/api\/links\/(\d+)\/clicks$/);
+  if (linkClicksMatch) {
+    if (method !== 'GET') return error('მეთოდი დაუშვებელია.', 405);
+    const id = parseInt(linkClicksMatch[1], 10);
+    const exists = await env.DB.prepare('SELECT id FROM links WHERE id = ?').bind(id).first();
+    if (!exists) return error('ბმული არ მოიძებნა.', 404);
+    const rows = await env.DB.prepare(
+      'SELECT clicked_at FROM click_events WHERE link_id = ? ' +
+      'ORDER BY clicked_at DESC, id DESC LIMIT 50',
+    ).bind(id).all();
+    return json({ events: (rows.results || []).map((r) => ({ clickedAt: r.clicked_at })) });
   }
 
   // --- Update / delete one link ------------------------------------------
