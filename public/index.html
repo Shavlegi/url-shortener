@@ -147,6 +147,66 @@
     </div>
   </section>
 
+  <!-- QR Maker (v5): standalone QR codes for anything. -->
+  <section class="card" id="qr-maker-card">
+    <h2>QR შემქმნელი</h2>
+    <p class="muted">QR კოდი ნებისმიერი რამისთვის — ბმული, Instagram, Wi-Fi, ტელეფონი, ტექსტი ან Google შეფასება. ყველაფერი თქვენს მოწყობილობაში იქმნება, სერვერზე არაფერი იგზავნება.</p>
+    <div class="tabs" id="qr-type-tabs" role="group" aria-label="QR ტიპი">
+      <button type="button" class="btn small tab-btn active" data-qr-type="link">🔗 ბმული</button>
+      <button type="button" class="btn small tab-btn" data-qr-type="instagram">📸 Instagram</button>
+      <button type="button" class="btn small tab-btn" data-qr-type="wifi">📶 Wi-Fi</button>
+      <button type="button" class="btn small tab-btn" data-qr-type="phone">📞 ტელეფონი</button>
+      <button type="button" class="btn small tab-btn" data-qr-type="text">📝 ტექსტი</button>
+      <button type="button" class="btn small tab-btn" data-qr-type="review">⭐ შეფასება</button>
+    </div>
+    <div id="qr-type-fields"></div>
+    <label class="field">
+      <span>სახელი <small>(რჩეულებში შესანახად — ცარიელი = ავტომატური)</small></span>
+      <input id="qr-label-input" type="text" autocomplete="off" maxlength="100" placeholder="მაგ. კაფის Wi-Fi">
+    </label>
+    <div class="row">
+      <label class="field">
+        <span>QR ფერი</span>
+        <input id="qr-fg-input" type="color" value="#000000">
+      </label>
+      <label class="field">
+        <span>ფონი</span>
+        <input id="qr-bg-input" type="color" value="#ffffff">
+      </label>
+    </div>
+    <label class="field">
+      <span>ლოგო <small>(არასავალდებულო — სურათი ცენტრში)</small></span>
+      <input id="qr-logo-input" type="file" accept="image/*">
+    </label>
+    <p class="muted"><span id="qr-logo-name"></span> <button type="button" class="btn link" id="qr-logo-clear" hidden>ლოგოს მოხსნა</button></p>
+    <div class="result-actions">
+      <button id="qr-make-btn" class="btn primary" type="button">QR-ის შექმნა</button>
+      <button id="qr-scan-btn" class="btn" type="button">📷 სკანირება</button>
+    </div>
+    <p id="qr-maker-error" class="error" hidden></p>
+    <div id="qr-maker-result" class="result" hidden>
+      <canvas id="qr-maker-canvas" width="512" height="512"></canvas>
+      <p id="qr-maker-payload" class="short-url"></p>
+      <div class="result-actions">
+        <button id="qr-maker-download" class="btn primary" type="button">PNG გადმოწერა</button>
+        <button id="qr-maker-save" class="btn" type="button">რჩეულებში შენახვა</button>
+      </div>
+    </div>
+    <div id="qr-scanner" hidden>
+      <h3>სკანირება</h3>
+      <video id="qr-video" playsinline></video>
+      <p id="qr-scan-status" class="muted"></p>
+      <p id="qr-scan-result" class="short-url" hidden></p>
+      <div id="qr-scan-actions" class="result-actions"></div>
+      <div class="result-actions">
+        <button id="qr-scan-close" class="btn" type="button">დახურვა</button>
+      </div>
+    </div>
+    <h3>რჩეულები</h3>
+    <p id="qr-fav-empty" class="muted">რჩეული QR-ები ჯერ არ გაქვთ.</p>
+    <div id="qr-fav-list" class="links-list"></div>
+  </section>
+
   <!-- My links (only when logged in) -->
   <section id="my-links-card" class="card" hidden>
     <h2>ჩემი ბმულები</h2>
@@ -214,6 +274,7 @@
   <div id="toast" class="toast" hidden></div>
 </main>
 <script src="/qrcode.min.js"></script>
+<script src="/qr-maker.js"></script>
 <script src="/public.js"></script>
 <script src="/auth.js"></script>
 </body>

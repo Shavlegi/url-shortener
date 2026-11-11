@@ -638,6 +638,55 @@ async function ensureV4Schema(env) {
   }
 }
 
+/* ---------------- Lazy v5 schema migration ---------------- */
+
+// Same idempotent pattern as v4 (see ensureV4Schema): applies
+// migrations/0005_qr_favorites.sql on first use. Adds a `qr_favorites`
+// table for logged-in users' saved QR codes (label + payload + colors).
+// Anonymous users keep favorites in localStorage on their own device.
+let v5SchemaChecked = false;
+
+async function ensureV5Schema(env) {
+  if (v5SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v5_qr_favorites'",
+    ).first();
+    if (flag && flag.value === '5') {
+      v5SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS qr_favorites (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'user_id INTEGER NOT NULL, ' +
+      'type TEXT NOT NULL, ' +
+      'label TEXT NOT NULL, ' +
+      'payload TEXT NOT NULL, ' +
+      "fg TEXT NOT NULL DEFAULT '#000000', " +
+      "bg TEXT NOT NULL DEFAULT '#ffffff', " +
+      'created_at INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_qr_favorites_user ON qr_favorites (user_id, created_at DESC)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v5_qr_favorites', '5')",
+    ).run();
+    v5SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v5 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
 /* ------------------------------------------------------------------ */
@@ -890,6 +939,7 @@ const STATIC_TYPES = {
   '/app.js': 'text/javascript; charset=utf-8',
   '/public.js': 'text/javascript; charset=utf-8',
   '/auth.js': 'text/javascript; charset=utf-8',
+  '/qr-maker.js': 'text/javascript; charset=utf-8',
   '/qrcode.min.js': 'text/javascript; charset=utf-8',
   '/favicon.ico': 'image/x-icon',
 };
@@ -1051,6 +1101,8 @@ async function handleApi(request, env, url) {
   await ensureV3Schema(env);
   // v4 schema (links.note) — same lazy pattern, see ensureV4Schema.
   await ensureV4Schema(env);
+  // v5 schema (qr_favorites) — same lazy pattern, see ensureV5Schema.
+  await ensureV5Schema(env);
 
   // --- Public: login -------------------------------------------------
   if (path === '/api/login' && method === 'POST') {
@@ -1343,6 +1395,66 @@ async function handleApi(request, env, url) {
         note: r.note !== undefined && r.note !== null ? r.note : '',
       })),
     });
+  }
+
+  // --- v5: QR Maker favorites (logged-in users only) ------------------
+  // Anonymous users keep favorites in localStorage on their own device.
+  function validateQrFavorite(body) {
+    if (!body || typeof body !== 'object') return { ok: false, reason: 'მონაცემები არასწორია.' };
+    const types = ['link', 'instagram', 'wifi', 'phone', 'text', 'review'];
+    if (!types.includes(body.type)) return { ok: false, reason: 'QR ტიპი არასწორია.' };
+    if (typeof body.label !== 'string' || !body.label.trim()) return { ok: false, reason: 'სახელი შეიყვანეთ.' };
+    const label = body.label.trim();
+    if (label.length > 100) return { ok: false, reason: 'სახელი მაქს. 100 სიმბოლოა.' };
+    if (typeof body.payload !== 'string' || !body.payload.trim()) return { ok: false, reason: 'QR შიგთავსი ცარიელია.' };
+    const payload = body.payload.trim();
+    if (payload.length > 2048) return { ok: false, reason: 'QR შიგთავსი ძალიან გრძელია (მაქს. 2048 სიმბოლო).' };
+    const colorRe = /^#[0-9a-fA-F]{6}$/;
+    const fg = typeof body.fg === 'string' && colorRe.test(body.fg) ? body.fg : '#000000';
+    const bg = typeof body.bg === 'string' && colorRe.test(body.bg) ? body.bg : '#ffffff';
+    return { ok: true, fav: { type: body.type, label, payload, fg, bg } };
+  }
+
+  if (path === '/api/auth/qr-favorites' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const rows = await env.DB.prepare(
+      'SELECT id, type, label, payload, fg, bg, created_at FROM qr_favorites WHERE user_id = ? ORDER BY created_at DESC LIMIT 100',
+    ).bind(userSession.userId).all();
+    return json({ favorites: rows.results || [] });
+  }
+
+  if (path === '/api/auth/qr-favorites' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const allowed = await checkRateLimit(request, env, 'qr-fav-create', 20, 3600);
+    if (!allowed) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ საათში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const v = validateQrFavorite(parsed.body);
+    if (!v.ok) return error(v.reason, 400);
+    const now = Date.now();
+    const res = await env.DB.prepare(
+      'INSERT INTO qr_favorites (user_id, type, label, payload, fg, bg, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).bind(userSession.userId, v.fav.type, v.fav.label, v.fav.payload, v.fav.fg, v.fav.bg, now).run();
+    if (!res.success) return error('შენახვა ვერ მოხერხდა.', 500);
+    return json({ ok: true, favorite: { id: res.meta.last_row_id, ...v.fav, created_at: now } }, 201);
+  }
+
+  const qrFavMatch = path.match(/^\/api\/auth\/qr-favorites\/(\d+)$/);
+  if (qrFavMatch) {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (method !== 'DELETE') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const id = parseInt(qrFavMatch[1], 10);
+    const own = await env.DB.prepare('SELECT user_id FROM qr_favorites WHERE id = ?').bind(id).first();
+    if (!own) return error('რჩეული არ მოიძებნა.', 404);
+    if (own.user_id !== userSession.userId) return error('ეს რჩეული თქვენ არ გეკუთვნით.', 403);
+    const res = await env.DB.prepare('DELETE FROM qr_favorites WHERE id = ?').bind(id).run();
+    if (!res.success || (res.meta && res.meta.changes === 0)) return error('რჩეული არ მოიძებნა.', 404);
+    return json({ ok: true });
   }
 
   // --- v3: click history of one of the user's own links ---------------

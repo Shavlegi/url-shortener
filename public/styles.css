@@ -216,3 +216,30 @@ body.theme-black .toast, body.theme-blue .toast { background: #ffffff; color: #0
   position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
 }
+
+/* v5: QR Maker — form controls, preview canvas, scanner video. */
+select, textarea, input[type="tel"], input[type="color"] {
+  width: 100%;
+  padding: 11px 12px;
+  font-size: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+}
+select:focus, textarea:focus, input[type="tel"]:focus, input[type="color"]:focus {
+  outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent);
+}
+input[type="color"] { height: 44px; padding: 4px; cursor: pointer; }
+textarea { resize: vertical; min-height: 76px; }
+input:disabled { opacity: 0.55; }
+#qr-maker-canvas { width: 256px; height: 256px; max-width: 80vw; display: block; margin: 12px auto; }
+#qr-video { width: 100%; border-radius: 10px; background: #000; }
+.badge.type { background: #e8eefc; color: var(--primary); }
+.fav-payload { margin: 8px 0 4px; word-break: break-all; font-size: 0.9rem; color: var(--muted); }
+body.theme-black select, body.theme-blue select,
+body.theme-black textarea, body.theme-blue textarea,
+body.theme-black input[type="tel"], body.theme-blue input[type="tel"],
+body.theme-black input[type="color"], body.theme-blue input[type="color"] {
+  background: #0b1530; color: #fff; border-color: var(--border);
+}

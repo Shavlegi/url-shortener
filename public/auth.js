@@ -67,6 +67,8 @@ function setLoggedIn(user) {
   el('my-links-card').hidden = false;
   hideAuthCard();
   if (user) loadMyLinks();
+  // v5: QR favorites switch to the server list when logged in.
+  if (typeof loadQrFavorites === 'function') loadQrFavorites();
 }
 
 function setLoggedOut() {
@@ -76,6 +78,14 @@ function setLoggedOut() {
   el('auth-logged-in').hidden = true;
   el('my-links-card').hidden = true;
   renderMyLinks();
+  // v5: QR favorites fall back to this device's localStorage list.
+  if (typeof loadQrFavorites === 'function') loadQrFavorites();
+}
+
+// v5: public.js asks this to decide where QR favorites live
+// (server when logged in, localStorage when anonymous).
+function isUserLoggedIn() {
+  return !!authUser;
 }
 
 async function checkUserAuth() {
