@@ -1580,6 +1580,40 @@ async function handleApi(request, env, url) {
     return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
   }
 
+  // --- v5 (admin): all users' QR favorites -----------------------------
+  // The admin sees every logged-in user's saved QR codes (like links),
+  // with the owner's username. Anonymous QR favorites live only on the
+  // user's own device (localStorage) and never reach the server.
+  if (path === '/api/qr-favorites' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT q.id, q.user_id, q.type, q.label, q.payload, q.fg, q.bg, q.created_at, u.username AS owner ' +
+      'FROM qr_favorites q LEFT JOIN users u ON u.id = q.user_id ' +
+      'ORDER BY q.created_at DESC LIMIT 500',
+    ).all();
+    return json({
+      favorites: (rows.results || []).map((r) => ({
+        id: r.id,
+        type: r.type,
+        label: r.label,
+        payload: r.payload,
+        fg: r.fg,
+        bg: r.bg,
+        createdAt: r.created_at,
+        owner: r.owner || null,
+      })),
+    });
+  }
+
+  const qrFavAdminMatch = path.match(/^\/api\/qr-favorites\/(\d+)$/);
+  if (qrFavAdminMatch) {
+    if (method !== 'DELETE') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const id = parseInt(qrFavAdminMatch[1], 10);
+    const res = await env.DB.prepare('DELETE FROM qr_favorites WHERE id = ?').bind(id).run();
+    if (!res.success || (res.meta && res.meta.changes === 0)) return error('QR კოდი არ მოიძებნა.', 404);
+    return json({ ok: true });
+  }
+
   // --- Check alias availability ----------------------------------------
   if (path === '/api/check-alias' && method === 'GET') {
     const alias = url.searchParams.get('alias') || '';
@@ -1780,11 +1814,13 @@ async function handleApi(request, env, url) {
   }
 
   // --- Admin: list users -------------------------------------------------
-  // Never returns password hashes. link_count counts the user's own links.
+  // Never returns password hashes. link_count counts the user's own links,
+  // qr_count counts the user's saved QR codes (v5 favorites).
   if (path === '/api/admin/users' && method === 'GET') {
     const rows = await env.DB.prepare(
       'SELECT u.id, u.username, u.email, u.email_verified, u.disabled, u.created_at, ' +
-      '(SELECT COUNT(*) FROM links WHERE user_id = u.id) AS link_count ' +
+      '(SELECT COUNT(*) FROM links WHERE user_id = u.id) AS link_count, ' +
+      '(SELECT COUNT(*) FROM qr_favorites WHERE user_id = u.id) AS qr_count ' +
       'FROM users u ORDER BY u.created_at DESC',
     ).all();
     return json({
@@ -1796,6 +1832,7 @@ async function handleApi(request, env, url) {
         disabled: r.disabled === 1,
         createdAt: r.created_at,
         linkCount: r.link_count,
+        qrCount: r.qr_count,
       })),
     });
   }

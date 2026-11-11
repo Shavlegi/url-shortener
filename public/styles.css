@@ -237,6 +237,7 @@ input:disabled { opacity: 0.55; }
 #qr-video { width: 100%; border-radius: 10px; background: #000; }
 .badge.type { background: #e8eefc; color: var(--primary); }
 .fav-payload { margin: 8px 0 4px; word-break: break-all; font-size: 0.9rem; color: var(--muted); }
+.color-dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); vertical-align: middle; margin-right: 4px; }
 body.theme-black select, body.theme-blue select,
 body.theme-black textarea, body.theme-blue textarea,
 body.theme-black input[type="tel"], body.theme-blue input[type="tel"],

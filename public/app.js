@@ -91,7 +91,7 @@ async function checkAuth() {
 function setAuthed(yes) {
   loginView.hidden = yes;
   appView.hidden = !yes;
-  if (yes) { loadLinks(); loadUsers(); }
+  if (yes) { loadLinks(); loadUsers(); loadQrFavoritesAdmin(); }
 }
 
 $('login-form').addEventListener('submit', async (e) => {
@@ -133,7 +133,7 @@ $('revoke-btn').addEventListener('click', async () => {
 
 /* ---------------- Tabs (admin menu) ---------------- */
 
-const TABS = ['links', 'users', 'create', 'stats', 'settings'];
+const TABS = ['links', 'users', 'qr', 'create', 'stats', 'settings'];
 let currentTab = 'links';
 let activityPeriod = 'today';
 
@@ -148,6 +148,7 @@ function showTab(name) {
     renderStats();
     loadRecentClicks();
   }
+  if (name === 'qr') loadQrFavoritesAdmin();
   try { history.replaceState(null, '', '#' + name); } catch { /* ignore */ }
 }
 
@@ -381,6 +382,140 @@ $('search-input').addEventListener('input', () => {
   searchTimer = setTimeout(loadLinks, 350);
 });
 
+/* ---------------- QR favorites (v5, admin view) ---------------- */
+// The admin sees every logged-in user's saved QR codes, like links:
+// label + type + payload + colors + owner, with show (QR modal) and
+// delete. Anonymous favorites never reach the server (localStorage only).
+let qrFavs = [];
+let qrFavLoaded = false;
+
+const QR_TYPE_NAMES = {
+  link: 'ბმული',
+  instagram: 'Instagram',
+  wifi: 'Wi-Fi',
+  phone: 'ტელეფონი',
+  text: 'ტექსტი',
+  review: 'Google შეფასება',
+};
+
+async function loadQrFavoritesAdmin() {
+  const err = $('qr-error');
+  hideError(err);
+  try {
+    const data = await api('/api/qr-favorites');
+    qrFavs = data.favorites || [];
+    qrFavLoaded = true;
+    renderQrFavorites();
+  } catch (e) {
+    showError(err, e.message || 'QR კოდების ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function filteredQrFavs() {
+  const q = ($('qr-search-input').value || '').trim().toLowerCase();
+  if (!q) return qrFavs;
+  return qrFavs.filter((f) =>
+    (f.label || '').toLowerCase().includes(q) ||
+    (f.owner || '').toLowerCase().includes(q) ||
+    (f.payload || '').toLowerCase().includes(q) ||
+    (QR_TYPE_NAMES[f.type] || f.type || '').toLowerCase().includes(q));
+}
+
+function renderQrFavorites() {
+  const list = $('qr-list');
+  list.innerHTML = '';
+  const shown = filteredQrFavs();
+  const q = ($('qr-search-input').value || '').trim();
+  $('qr-empty').hidden = shown.length !== 0;
+  $('qr-empty').textContent = q ? 'QR კოდი ვერ მოიძებნა.' : 'QR კოდები ჯერ არ არის.';
+  for (const fav of shown) list.appendChild(qrFavCard(fav));
+  renderStats();
+}
+
+function qrFavCard(fav) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+
+  const title = document.createElement('p');
+  title.className = 'link-note';
+  title.textContent = fav.label;
+  card.appendChild(title);
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const type = document.createElement('span');
+  type.className = 'link-alias';
+  type.textContent = QR_TYPE_NAMES[fav.type] || fav.type;
+  top.appendChild(type);
+  const badge = document.createElement('span');
+  badge.className = 'badge type';
+  badge.textContent = '👤 ' + (fav.owner || '—');
+  top.appendChild(badge);
+  card.appendChild(top);
+
+  const payload = document.createElement('p');
+  payload.className = 'fav-payload';
+  payload.textContent = fav.payload;
+  card.appendChild(payload);
+
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = 'შექმნილია: ' + fmtDate(fav.createdAt);
+  card.appendChild(meta);
+
+  const colors = document.createElement('p');
+  colors.className = 'link-meta';
+  colors.textContent = 'ფერები: ';
+  const fgSw = document.createElement('span');
+  fgSw.className = 'color-dot';
+  fgSw.style.background = fav.fg || '#000000';
+  fgSw.title = 'QR ფერი';
+  const bgSw = document.createElement('span');
+  bgSw.className = 'color-dot';
+  bgSw.style.background = fav.bg || '#ffffff';
+  bgSw.title = 'ფონი';
+  colors.appendChild(fgSw);
+  colors.appendChild(bgSw);
+  card.appendChild(colors);
+
+  const actions = document.createElement('div');
+  actions.className = 'link-actions';
+
+  const showBtn = document.createElement('button');
+  showBtn.className = 'btn small';
+  showBtn.textContent = 'QR ჩვენება';
+  showBtn.addEventListener('click', () => openQrFavorite(fav));
+  actions.appendChild(showBtn);
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn small';
+  copyBtn.textContent = 'კოპირება';
+  copyBtn.addEventListener('click', async () => {
+    if (await copyText(fav.payload)) toast('დაკოპირდა');
+    else toast('კოპირება ვერ მოხერხდა');
+  });
+  actions.appendChild(copyBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn small danger';
+  delBtn.textContent = 'წაშლა';
+  delBtn.addEventListener('click', async () => {
+    if (!window.confirm('ნამდვილად წავშალო QR „' + fav.label + '"?')) return;
+    try {
+      await api('/api/qr-favorites/' + fav.id, { method: 'DELETE' });
+      toast('QR კოდი წაიშალა');
+      loadQrFavoritesAdmin();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(delBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+// Live search: every keystroke filters the already-loaded favorites.
+$('qr-search-input').addEventListener('input', renderQrFavorites);
+
 /* ---------------- Users (v2) ---------------- */
 
 let users = [];
@@ -460,7 +595,7 @@ function userCard(user) {
 
   const meta = document.createElement('p');
   meta.className = 'link-meta';
-  meta.textContent = `🔗 ${user.linkCount} ბმული · რეგისტრირებულია: ${fmtDate(user.createdAt)}`;
+  meta.textContent = `🔗 ${user.linkCount} ბმული · 📱 ${user.qrCount || 0} QR · რეგისტრირებულია: ${fmtDate(user.createdAt)}`;
   card.appendChild(meta);
 
   const actions = document.createElement('div');
@@ -534,7 +669,11 @@ async function openProfile(user) {
     const data = await api('/api/links');
     const mine = (data.links || []).filter((l) => l.owner === user.username);
     const totalClicks = mine.reduce((s, l) => s + (l.clicks || 0), 0);
-    $('profile-count').textContent = mine.length + ' ბმული · ' + totalClicks + ' გახსნა';
+    if (!qrFavLoaded) {
+      try { await loadQrFavoritesAdmin(); } catch { /* QR count stays 0 */ }
+    }
+    const qrMine = qrFavs.filter((f) => f.owner === user.username);
+    $('profile-count').textContent = mine.length + ' ბმული · ' + totalClicks + ' გახსნა · ' + qrMine.length + ' QR რჩეული';
     $('profile-links-empty').hidden = mine.length !== 0;
     for (const link of mine) $('profile-links').appendChild(profileLinkRow(link));
   } catch (e) {
@@ -620,6 +759,7 @@ function renderStats() {
   $('stat-clicks').textContent = String(links.reduce((s, l) => s + (l.clicks || 0), 0));
   $('stat-users').textContent = String(users.length);
   $('stat-active-users').textContent = String(users.filter((u) => u.emailVerified && !u.disabled).length);
+  $('stat-qr').textContent = String(qrFavs.length);
 
   const range = periodRange();
   const events = [];
@@ -638,6 +778,15 @@ function renderStats() {
         ts: user.createdAt,
         who: user.username,
         text: 'დარეგისტრირდა: ' + user.username + ' (' + user.email + ')',
+      });
+    }
+  }
+  for (const fav of qrFavs) {
+    if (fav.createdAt >= range.from && fav.createdAt <= range.to) {
+      events.push({
+        ts: fav.createdAt,
+        who: fav.owner || '—',
+        text: 'QR რჩეული შეიქმნა: ' + fav.label + ' (' + (QR_TYPE_NAMES[fav.type] || fav.type) + ')',
       });
     }
   }
@@ -766,7 +915,8 @@ $('history-modal').addEventListener('click', (e) => {
 
 /* ---------------- Stat cards: open the matching view ---------------- */
 // Links -> Links tab; Clicks -> recent-clicks block on this page;
-// Users -> Users tab (all); Active users -> Users tab, active only.
+// Users -> Users tab (all); Active users -> Users tab, active only;
+// QR -> QR tab.
 function openStatCard(target) {
   if (target === 'links') {
     showTab('links');
@@ -783,6 +933,8 @@ function openStatCard(target) {
     userFilter = 'active';
     showTab('users');
     renderUsers();
+  } else if (target === 'qr') {
+    showTab('qr');
   }
 }
 
@@ -791,6 +943,7 @@ const STAT_CARDS = {
   'stat-card-clicks': 'clicks',
   'stat-card-users': 'users',
   'stat-card-active': 'active',
+  'stat-card-qr': 'qr',
 };
 for (const [id, target] of Object.entries(STAT_CARDS)) {
   const card = $(id);
@@ -944,9 +1097,14 @@ $('create-form').addEventListener('submit', async (e) => {
 /* ---------------- QR ---------------- */
 
 let currentQrLink = null;
+let currentQrDownloadName = null;
 
-function drawQr(canvas, text, size) {
+function drawQr(canvas, text, size, opts) {
   // qrcode-generator (vendored in qrcode.min.js): 0 = auto type number.
+  // opts: { fg, bg } — saved QR favorites keep their colors.
+  opts = opts || {};
+  const fg = opts.fg || '#000000';
+  const bg = opts.bg || '#ffffff';
   const qr = qrcode(0, 'M');
   qr.addData(text);
   qr.make();
@@ -957,9 +1115,9 @@ function drawQr(canvas, text, size) {
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = bg;
   ctx.fillRect(0, 0, size, size);
-  ctx.fillStyle = '#000000';
+  ctx.fillStyle = fg;
   for (let r = 0; r < count; r++) {
     for (let c = 0; c < count; c++) {
       if (qr.isDark(r, c)) {
@@ -976,6 +1134,7 @@ function drawQr(canvas, text, size) {
 
 function openQr(link) {
   currentQrLink = link;
+  currentQrDownloadName = link.alias;
   $('qr-title').textContent = 'QR კოდი — ' + link.alias;
   $('qr-url').textContent = link.shortUrl;
   try {
@@ -987,20 +1146,37 @@ function openQr(link) {
   $('qr-modal').hidden = false;
 }
 
+// A saved QR favorite (v5): same modal, but the payload is the QR content
+// (Wi-Fi string, tel:, text…) and the favorite's own colors are used.
+function openQrFavorite(fav) {
+  currentQrLink = null;
+  currentQrDownloadName = (fav.label || 'qr').replace(/[^A-Za-z0-9ა-ჰ]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'qr';
+  $('qr-title').textContent = 'QR კოდი — ' + fav.label;
+  $('qr-url').textContent = fav.payload;
+  try {
+    drawQr($('qr-canvas'), fav.payload, 256, { fg: fav.fg, bg: fav.bg });
+  } catch (e) {
+    toast('QR კოდის შექმნა ვერ მოხერხდა: შიგთავსი ძალიან გრძელია');
+    return;
+  }
+  $('qr-modal').hidden = false;
+}
+
 $('qr-close').addEventListener('click', () => { $('qr-modal').hidden = true; });
 $('qr-modal').addEventListener('click', (e) => {
   if (e.target === $('qr-modal')) $('qr-modal').hidden = true;
 });
 
 $('qr-download').addEventListener('click', () => {
-  if (!currentQrLink) return;
+  const name = currentQrDownloadName || (currentQrLink && currentQrLink.alias);
+  if (!name) return;
   const canvas = $('qr-canvas');
   canvas.toBlob((blob) => {
     if (!blob) { toast('PNG შენახვა ვერ მოხერხდა'); return; }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = currentQrLink.alias + '-qr.png';
+    a.download = name + '-qr.png';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

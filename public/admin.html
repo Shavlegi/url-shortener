@@ -38,6 +38,7 @@
     <nav class="tabs" aria-label="ადმინ მენიუ">
       <button id="tabbtn-links" class="btn tab-btn active" type="button">🔗 ბმულები</button>
       <button id="tabbtn-users" class="btn tab-btn" type="button">👥 მომხმარებლები</button>
+      <button id="tabbtn-qr" class="btn tab-btn" type="button">📱 QR კოდები</button>
       <button id="tabbtn-create" class="btn tab-btn" type="button">➕ ახალი ბმული</button>
       <button id="tabbtn-stats" class="btn tab-btn" type="button">📊 სტატისტიკა</button>
       <button id="tabbtn-settings" class="btn tab-btn" type="button">⚙️ პარამეტრები</button>
@@ -102,6 +103,18 @@
       <p id="users-error" class="error" hidden></p>
     </section>
 
+    <section class="card" id="section-qr" hidden>
+      <h2>QR კოდები</h2>
+      <p class="muted">მომხმარებლების შენახული QR კოდები (რჩეულები) — როგორც ბმულები, მფლობელით. ანონიმური QR-ები აქ არ ჩანს: ისინი მხოლოდ იმ მოწყობილობაში ინახება.</p>
+      <label class="field">
+        <span class="sr-only">ძებნა</span>
+        <input id="qr-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი, მფლობელი ან შიგთავსი…">
+      </label>
+      <p id="qr-empty" class="muted" hidden>QR კოდები ჯერ არ არის.</p>
+      <div id="qr-list" class="links-list"></div>
+      <p id="qr-error" class="error" hidden></p>
+    </section>
+
     <section class="card" id="section-stats" hidden>
       <h2>სტატისტიკა</h2>
       <div class="stats-grid">
@@ -109,6 +122,7 @@
         <div class="stat stat-link" id="stat-card-clicks" role="button" tabindex="0" title="ბოლო გახსნების ნახვა"><span class="stat-num" id="stat-clicks">0</span><span class="stat-label">გახსნა</span></div>
         <div class="stat stat-link" id="stat-card-users" role="button" tabindex="0" title="მომხმარებლების ნახვა"><span class="stat-num" id="stat-users">0</span><span class="stat-label">მომხმარებელი</span></div>
         <div class="stat stat-link" id="stat-card-active" role="button" tabindex="0" title="აქტიური მომხმარებლების ნახვა"><span class="stat-num" id="stat-active-users">0</span><span class="stat-label">აქტიური მომხმარებელი</span></div>
+        <div class="stat stat-link" id="stat-card-qr" role="button" tabindex="0" title="QR კოდების ნახვა"><span class="stat-num" id="stat-qr">0</span><span class="stat-label">QR კოდი</span></div>
       </div>
       <h3>აქტივობა</h3>
       <div class="tabs period-tabs" role="group" aria-label="პერიოდი">
