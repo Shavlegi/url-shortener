@@ -456,6 +456,23 @@ function qrFavCard(fav) {
   const badge = document.createElement('span');
   badge.className = 'badge type';
   badge.textContent = '👤 ' + (fav.owner || 'ანონიმური');
+  // v6.2: tapping the owner's name opens their profile (same modal as the
+  // Users tab). Anonymous rows have no owner, so they stay plain text.
+  if (fav.owner) {
+    badge.classList.add('badge-link');
+    badge.setAttribute('role', 'button');
+    badge.setAttribute('tabindex', '0');
+    badge.title = 'პროფილის ნახვა';
+    const openOwnerProfile = () => {
+      const user = users.find((u) => u.username === fav.owner);
+      if (user) openProfile(user);
+      else toast('მომხმარებელი ვერ მოიძებნა');
+    };
+    badge.addEventListener('click', openOwnerProfile);
+    badge.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openOwnerProfile(); }
+    });
+  }
   top.appendChild(badge);
   card.appendChild(top);
 
