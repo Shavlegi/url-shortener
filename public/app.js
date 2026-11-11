@@ -447,9 +447,15 @@ function qrFavCard(fav) {
   type.className = 'link-alias';
   type.textContent = QR_TYPE_NAMES[fav.type] || fav.type;
   top.appendChild(type);
+  if (fav.favorite) {
+    const star = document.createElement('span');
+    star.className = 'badge fav';
+    star.textContent = '⭐ რჩეული';
+    top.appendChild(star);
+  }
   const badge = document.createElement('span');
   badge.className = 'badge type';
-  badge.textContent = '👤 ' + (fav.owner || '—');
+  badge.textContent = '👤 ' + (fav.owner || 'ანონიმური');
   top.appendChild(badge);
   card.appendChild(top);
 
@@ -673,7 +679,7 @@ async function openProfile(user) {
       try { await loadQrFavoritesAdmin(); } catch { /* QR count stays 0 */ }
     }
     const qrMine = qrFavs.filter((f) => f.owner === user.username);
-    $('profile-count').textContent = mine.length + ' ბმული · ' + totalClicks + ' გახსნა · ' + qrMine.length + ' QR რჩეული';
+    $('profile-count').textContent = mine.length + ' ბმული · ' + totalClicks + ' გახსნა · ' + qrMine.length + ' QR კოდი';
     $('profile-links-empty').hidden = mine.length !== 0;
     for (const link of mine) $('profile-links').appendChild(profileLinkRow(link));
   } catch (e) {

@@ -236,6 +236,7 @@ input:disabled { opacity: 0.55; }
 #qr-maker-canvas { width: 256px; height: 256px; max-width: 80vw; display: block; margin: 12px auto; }
 #qr-video { width: 100%; border-radius: 10px; background: #000; }
 .badge.type { background: #e8eefc; color: var(--primary); }
+.badge.fav { background: #fff3cd; color: #7a5b00; }
 .fav-payload { margin: 8px 0 4px; word-break: break-all; font-size: 0.9rem; color: var(--muted); }
 .color-dot { display: inline-block; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border); vertical-align: middle; margin-right: 4px; }
 body.theme-black select, body.theme-blue select,

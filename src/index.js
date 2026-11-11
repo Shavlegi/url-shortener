@@ -687,6 +687,66 @@ async function ensureV5Schema(env) {
   }
 }
 
+/* ---------------- Lazy v6 schema migration ---------------- */
+
+// Same idempotent pattern as v5 (see ensureV5Schema): applies
+// migrations/0006_qr_history.sql on first use. Adds a `qr_history` table
+// that logs EVERY QR the Maker generates (logged-in users get their
+// user_id attached, anonymous rows stay ownerless), so the admin sees
+// everything — like links — not just saved favorites. `favorite` marks
+// rows the user also saved as a favorite. Existing favorites (if any)
+// are copied in as favorite=1.
+let v6SchemaChecked = false;
+
+async function ensureV6Schema(env) {
+  if (v6SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v6_qr_history'",
+    ).first();
+    if (flag && flag.value === '6') {
+      v6SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS qr_history (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'user_id INTEGER, ' +
+      'type TEXT NOT NULL, ' +
+      'label TEXT NOT NULL, ' +
+      'payload TEXT NOT NULL, ' +
+      "fg TEXT NOT NULL DEFAULT '#000000', " +
+      "bg TEXT NOT NULL DEFAULT '#ffffff', " +
+      'favorite INTEGER NOT NULL DEFAULT 0, ' +
+      'created_at INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_qr_history_user ON qr_history (user_id, created_at DESC)',
+    ).run();
+    // Copy existing favorites in as favorite=1 (guarded: a retried
+    // migration must not duplicate them).
+    await env.DB.prepare(
+      'INSERT INTO qr_history (user_id, type, label, payload, fg, bg, favorite, created_at) ' +
+      'SELECT user_id, type, label, payload, fg, bg, 1, created_at FROM qr_favorites ' +
+      'WHERE NOT EXISTS (SELECT 1 FROM qr_history h WHERE h.user_id = qr_favorites.user_id AND h.payload = qr_favorites.payload AND h.favorite = 1)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v6_qr_history', '6')",
+    ).run();
+    v6SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v6 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
 /* ------------------------------------------------------------------ */
@@ -1103,6 +1163,8 @@ async function handleApi(request, env, url) {
   await ensureV4Schema(env);
   // v5 schema (qr_favorites) — same lazy pattern, see ensureV5Schema.
   await ensureV5Schema(env);
+  // v6 schema (qr_history) — same lazy pattern, see ensureV6Schema.
+  await ensureV6Schema(env);
 
   // --- Public: login -------------------------------------------------
   if (path === '/api/login' && method === 'POST') {
@@ -1439,6 +1501,20 @@ async function handleApi(request, env, url) {
       'INSERT INTO qr_favorites (user_id, type, label, payload, fg, bg, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
     ).bind(userSession.userId, v.fav.type, v.fav.label, v.fav.payload, v.fav.fg, v.fav.bg, now).run();
     if (!res.success) return error('შენახვა ვერ მოხერხდა.', 500);
+    // v6: mark the matching generation as a favorite in the history log.
+    // If the generation has not been logged yet (slow network), record it
+    // here so the admin still sees it.
+    try {
+      const marked = await env.DB.prepare(
+        'UPDATE qr_history SET favorite = 1 WHERE id = ' +
+        '(SELECT id FROM qr_history WHERE user_id = ? AND payload = ? ORDER BY created_at DESC LIMIT 1)',
+      ).bind(userSession.userId, v.fav.payload).run();
+      if (!marked.meta || marked.meta.changes === 0) {
+        await env.DB.prepare(
+          'INSERT INTO qr_history (user_id, type, label, payload, fg, bg, favorite, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)',
+        ).bind(userSession.userId, v.fav.type, v.fav.label, v.fav.payload, v.fav.fg, v.fav.bg, now).run();
+      }
+    } catch { /* history flag is best-effort */ }
     return json({ ok: true, favorite: { id: res.meta.last_row_id, ...v.fav, created_at: now } }, 201);
   }
 
@@ -1449,12 +1525,51 @@ async function handleApi(request, env, url) {
     if (method !== 'DELETE') return error('მეთოდი დაუშვებელია.', 405);
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const id = parseInt(qrFavMatch[1], 10);
-    const own = await env.DB.prepare('SELECT user_id FROM qr_favorites WHERE id = ?').bind(id).first();
+    const own = await env.DB.prepare('SELECT user_id, payload FROM qr_favorites WHERE id = ?').bind(id).first();
     if (!own) return error('რჩეული არ მოიძებნა.', 404);
     if (own.user_id !== userSession.userId) return error('ეს რჩეული თქვენ არ გეკუთვნით.', 403);
     const res = await env.DB.prepare('DELETE FROM qr_favorites WHERE id = ?').bind(id).run();
     if (!res.success || (res.meta && res.meta.changes === 0)) return error('რჩეული არ მოიძებნა.', 404);
+    // v6: the generation stays in the history log, but is no longer a favorite.
+    try {
+      await env.DB.prepare(
+        'UPDATE qr_history SET favorite = 0 WHERE user_id = ? AND payload = ?',
+      ).bind(userSession.userId, own.payload).run();
+    } catch { /* history flag is best-effort */ }
     return json({ ok: true });
+  }
+
+  // --- v6: log every generated QR (public, fire-and-forget) ------------
+  // The QR Maker renders on-device, but each generation is also logged
+  // server-side so the admin sees EVERYTHING (like links): logged-in
+  // users get their user_id attached, anonymous rows stay ownerless.
+  // The client ignores failures — the QR still renders. Privacy note:
+  // unlike v5, the generated QR content IS sent to the server now; no IP
+  // is stored (rate limiting uses only the daily IP hash).
+  if (path === '/api/qr-log' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const allowedMin = await checkRateLimit(request, env, 'qr-log', 20, 60);
+    const allowedHour = allowedMin && await checkRateLimit(request, env, 'qr-log-hour', 200, 3600);
+    if (!allowedHour) return error('ძალიან ბევრი მოთხოვნა. სცადეთ მოგვიანებით.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const v = validateQrFavorite(parsed.body);
+    if (!v.ok) return error(v.reason, 400);
+    const userSession = await getUserSession(env, request);
+    const now = Date.now();
+    const res = await env.DB.prepare(
+      'INSERT INTO qr_history (user_id, type, label, payload, fg, bg, favorite, created_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?)',
+    ).bind(userSession ? userSession.userId : null, v.fav.type, v.fav.label, v.fav.payload, v.fav.fg, v.fav.bg, now).run();
+    if (!res.success) return error('ჩაწერა ვერ მოხერხდა.', 500);
+    // Prune old non-favorite rows so the log cannot grow forever
+    // (newest ~2000 generations are kept; favorites are never pruned).
+    try {
+      await env.DB.prepare(
+        'DELETE FROM qr_history WHERE favorite = 0 AND created_at < ' +
+        '(SELECT created_at FROM qr_history ORDER BY created_at DESC LIMIT 1 OFFSET 1999)',
+      ).run();
+    } catch { /* prune is best-effort */ }
+    return json({ ok: true, id: res.meta.last_row_id }, 201);
   }
 
   // --- v3: click history of one of the user's own links ---------------
@@ -1581,13 +1696,13 @@ async function handleApi(request, env, url) {
   }
 
   // --- v5 (admin): all users' QR favorites -----------------------------
-  // The admin sees every logged-in user's saved QR codes (like links),
-  // with the owner's username. Anonymous QR favorites live only on the
-  // user's own device (localStorage) and never reach the server.
+  // v6: the admin sees EVERY generated QR (qr_history), not just saved
+  // favorites — like links. `favorite` marks rows the user also saved.
+  // Anonymous generations show with owner null ("ანონიმური").
   if (path === '/api/qr-favorites' && method === 'GET') {
     const rows = await env.DB.prepare(
-      'SELECT q.id, q.user_id, q.type, q.label, q.payload, q.fg, q.bg, q.created_at, u.username AS owner ' +
-      'FROM qr_favorites q LEFT JOIN users u ON u.id = q.user_id ' +
+      'SELECT q.id, q.user_id, q.type, q.label, q.payload, q.fg, q.bg, q.favorite, q.created_at, u.username AS owner ' +
+      'FROM qr_history q LEFT JOIN users u ON u.id = q.user_id ' +
       'ORDER BY q.created_at DESC LIMIT 500',
     ).all();
     return json({
@@ -1598,6 +1713,7 @@ async function handleApi(request, env, url) {
         payload: r.payload,
         fg: r.fg,
         bg: r.bg,
+        favorite: r.favorite === 1,
         createdAt: r.created_at,
         owner: r.owner || null,
       })),
@@ -1609,8 +1725,15 @@ async function handleApi(request, env, url) {
     if (method !== 'DELETE') return error('მეთოდი დაუშვებელია.', 405);
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const id = parseInt(qrFavAdminMatch[1], 10);
-    const res = await env.DB.prepare('DELETE FROM qr_favorites WHERE id = ?').bind(id).run();
-    if (!res.success || (res.meta && res.meta.changes === 0)) return error('QR კოდი არ მოიძებნა.', 404);
+    const row = await env.DB.prepare('SELECT user_id, payload FROM qr_history WHERE id = ?').bind(id).first();
+    if (!row) return error('QR კოდი არ მოიძებნა.', 404);
+    await env.DB.prepare('DELETE FROM qr_history WHERE id = ?').bind(id).run();
+    // If it was saved as a favorite, remove it from the user's favorites too.
+    if (row.user_id !== null && row.user_id !== undefined) {
+      await env.DB.prepare(
+        'DELETE FROM qr_favorites WHERE user_id = ? AND payload = ?',
+      ).bind(row.user_id, row.payload).run();
+    }
     return json({ ok: true });
   }
 

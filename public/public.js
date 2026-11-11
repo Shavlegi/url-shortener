@@ -439,7 +439,30 @@ $('qr-make-btn').addEventListener('click', () => {
     bg: $('qr-bg-input').value || '#ffffff',
   };
   renderMakerQr();
+  // v6: every generated QR is also logged server-side (fire-and-forget)
+  // so the admin sees everything, like links. The QR renders even if
+  // logging fails; nothing here waits on the network.
+  if (makerCurrent) logQrGeneration(makerCurrent);
 });
+
+// v6: log one generation to POST /api/qr-log. Logged-in users get their
+// user_id attached server-side; anonymous rows stay ownerless. Best-effort.
+async function logQrGeneration(fav) {
+  try {
+    await fetch('/api/qr-log', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: fav.type,
+        label: fav.label,
+        payload: fav.payload,
+        fg: fav.fg,
+        bg: fav.bg,
+      }),
+    });
+  } catch { /* logging is best-effort */ }
+}
 
 // Re-render live when colors change (only if a code is already shown).
 $('qr-fg-input').addEventListener('input', () => {
