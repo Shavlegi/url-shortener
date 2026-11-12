@@ -12,7 +12,7 @@
 <main class="wrap">
   <header class="header">
     <h1>Mini Link</h1>
-    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა &bull; v6.2</p>
+    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა &bull; v7.0</p>
   </header>
 
   <!-- Login (shown when logged out) -->
@@ -39,6 +39,7 @@
       <button id="tabbtn-links" class="btn tab-btn active" type="button">🔗 ბმულები</button>
       <button id="tabbtn-users" class="btn tab-btn" type="button">👥 მომხმარებლები</button>
       <button id="tabbtn-qr" class="btn tab-btn" type="button">📱 QR კოდები</button>
+      <button id="tabbtn-chat" class="btn tab-btn" type="button">💬 ჩატები <span id="chat-unread-badge" class="badge unread" hidden>0</span></button>
       <button id="tabbtn-create" class="btn tab-btn" type="button">➕ ახალი ბმული</button>
       <button id="tabbtn-stats" class="btn tab-btn" type="button">📊 სტატისტიკა</button>
       <button id="tabbtn-settings" class="btn tab-btn" type="button">⚙️ პარამეტრები</button>
@@ -113,6 +114,38 @@
       <p id="qr-empty" class="muted" hidden>QR კოდები ჯერ არ არის.</p>
       <div id="qr-list" class="links-list"></div>
       <p id="qr-error" class="error" hidden></p>
+    </section>
+
+    <section class="card" id="section-chat" hidden>
+      <h2>ჩატები</h2>
+      <p class="muted">ინდივიდუალური ჩატი მეილზე დადასტურებულ მომხმარებლებთან. ტექსტის გარდა ფოტოს და ფაილის გაგზავნაც შეგიძლიათ (მაქს. 1.5 MB).</p>
+      <div class="chat-picker-row">
+        <select id="chat-user-picker" aria-label="მომხმარებელი"></select>
+        <button id="chat-start-btn" class="btn" type="button">ახალი ჩატი</button>
+      </div>
+      <div id="chat-threads-view">
+        <p id="chat-threads-empty" class="muted" hidden>ჩატები ჯერ არ არის.</p>
+        <div id="chat-threads-list" class="links-list"></div>
+      </div>
+      <div id="chat-thread-view" hidden>
+        <h3 id="chat-thread-title"></h3>
+        <div id="chat-messages" class="chat-messages"></div>
+        <p id="chat-thread-empty" class="muted">შეტყობინებები ჯერ არ არის.</p>
+        <label class="field">
+          <span class="sr-only">შეტყობინება</span>
+          <textarea id="chat-input" rows="2" maxlength="2000" placeholder="შეტყობინება…"></textarea>
+        </label>
+        <input id="chat-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,application/zip" hidden>
+        <p class="muted" id="chat-attach-line" hidden>📎 <span id="chat-attach-name"></span> <button type="button" class="btn link" id="chat-attach-clear">მოხსნა</button></p>
+        <div class="result-actions">
+          <button id="chat-attach-btn" class="btn" type="button">📎 ფაილი</button>
+          <button id="chat-send-btn" class="btn primary" type="button">გაგზავნა</button>
+          <button id="chat-delete-btn" class="btn danger" type="button">თრედის წაშლა</button>
+          <button id="chat-back-btn" class="btn" type="button">← სია</button>
+        </div>
+        <p id="chat-thread-error" class="error" hidden></p>
+      </div>
+      <p id="chat-error" class="error" hidden></p>
     </section>
 
     <section class="card" id="section-stats" hidden>
@@ -242,6 +275,26 @@
       <div class="result-actions">
         <button id="qr-download" class="btn primary">PNG გადმოწერა</button>
         <button id="qr-close" class="btn">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- QR send modal (v7.0): send a generated QR to a verified user via chat -->
+  <div id="qr-send-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3>QR-ის გაგზავნა მომხმარებელთან</h3>
+      <p id="qr-send-label" class="link-dest"></p>
+      <label class="field">
+        <span>მომხმარებელი</span>
+        <select id="qr-send-user"></select>
+      </label>
+      <label class="field">
+        <span>შეტყობინება <small>(არასავალდებულო)</small></span>
+        <input id="qr-send-message" type="text" autocomplete="off" maxlength="2000" placeholder="მაგ. შენი QR კოდი მზადაა">
+      </label>
+      <div class="result-actions">
+        <button id="qr-send-submit" class="btn primary">გაგზავნა</button>
+        <button id="qr-send-close" class="btn">დახურვა</button>
       </div>
     </div>
   </div>

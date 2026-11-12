@@ -67,6 +67,12 @@ function setLoggedIn(user) {
   el('my-links-card').hidden = false;
   hideAuthCard();
   if (user) loadMyLinks();
+  // v7.0: the admin chat is shown ONLY to email-verified users (the
+  // server enforces the same gate on every chat route).
+  const showChat = !!(user && user.emailVerified);
+  el('chat-card').hidden = !showChat;
+  if (showChat) startUserChat();
+  else stopUserChat();
   // v5: QR favorites switch to the server list when logged in.
   if (typeof loadQrFavorites === 'function') loadQrFavorites();
 }
@@ -77,6 +83,8 @@ function setLoggedOut() {
   el('auth-logged-out').hidden = false;
   el('auth-logged-in').hidden = true;
   el('my-links-card').hidden = true;
+  el('chat-card').hidden = true;
+  stopUserChat();
   renderMyLinks();
   // v5: QR favorites fall back to this device's localStorage list.
   if (typeof loadQrFavorites === 'function') loadQrFavorites();
@@ -535,6 +543,163 @@ function myLinkCard(link) {
 el('my-search-input').addEventListener('input', () => {
   clearTimeout(authSearchTimer);
   authSearchTimer = setTimeout(renderMyLinks, 250);
+});
+
+/* ---------------- Admin chat (v7.0) ---------------- */
+// Visible ONLY to logged-in, email-verified users (the server enforces
+// the same gate on every chat route). Users send TEXT only; the admin
+// may also send photos and files, which render inline here. New
+// messages arrive by polling every 5 seconds while the page is open.
+const USER_CHAT_POLL_MS = 5000;
+
+let userChatLastId = 0;
+let userChatPollTimer = null;
+let userChatLoading = false;
+let userChatObserver = null;
+
+function userChatFormatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function userChatMessageEl(msg) {
+  const mine = msg.sender === 'user';
+  const box = document.createElement('div');
+  box.className = 'chat-msg ' + (mine ? 'mine' : 'theirs');
+  if (msg.body) {
+    const p = document.createElement('div');
+    p.textContent = msg.body;
+    box.appendChild(p);
+  }
+  if (msg.attachment) {
+    const att = msg.attachment;
+    if (att.mimeType.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = att.url;
+      img.alt = att.fileName;
+      img.loading = 'lazy';
+      box.appendChild(img);
+    }
+    const a = document.createElement('a');
+    a.className = 'chat-file';
+    a.href = att.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = '📎 ' + att.fileName + ' (' + userChatFormatBytes(att.sizeBytes) + ')';
+    box.appendChild(a);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'chat-meta';
+  meta.textContent = fmtDate(msg.createdAt);
+  box.appendChild(meta);
+  return box;
+}
+
+function appendUserChatMessage(msg) {
+  el('user-chat-messages').appendChild(userChatMessageEl(msg));
+  el('user-chat-empty').hidden = true;
+}
+
+function scrollUserChatToBottom() {
+  const box = el('user-chat-messages');
+  box.scrollTop = box.scrollHeight;
+}
+
+function updateUserChatBadge(unread) {
+  const badge = el('chat-user-unread-badge');
+  badge.textContent = String(unread);
+  badge.hidden = unread === 0;
+}
+
+async function markUserChatRead() {
+  try {
+    await authApi('/api/chat/read', { method: 'POST', body: '{}' });
+    updateUserChatBadge(0);
+  } catch { /* the next poll retries */ }
+}
+
+function isChatCardVisible() {
+  const card = el('chat-card');
+  if (card.hidden) return false;
+  const r = card.getBoundingClientRect();
+  return r.bottom > 0 && r.top < window.innerHeight;
+}
+
+async function loadUserChat() {
+  if (userChatLoading) return;
+  userChatLoading = true;
+  try {
+    const data = await authApi('/api/chat/thread' + (userChatLastId ? '?after=' + userChatLastId : ''));
+    hideError(el('user-chat-error'));
+    const messages = data.messages || [];
+    for (const m of messages) {
+      appendUserChatMessage(m);
+      userChatLastId = Math.max(userChatLastId, m.id);
+    }
+    if (messages.length) scrollUserChatToBottom();
+    const unread = data.thread ? data.thread.userUnread : 0;
+    updateUserChatBadge(unread);
+    if (unread > 0 && isChatCardVisible()) markUserChatRead();
+  } catch (e) {
+    // Polling retries in 5 seconds; only a first-load failure is shown.
+    if (userChatLastId === 0) showError(el('user-chat-error'), e.message || 'ჩატის ჩატვირთვა ვერ მოხერხდა.');
+  } finally {
+    userChatLoading = false;
+  }
+}
+
+function startUserChat() {
+  stopUserChat();
+  userChatLastId = 0;
+  el('user-chat-messages').innerHTML = '';
+  el('user-chat-empty').hidden = false;
+  hideError(el('user-chat-error'));
+  loadUserChat();
+  userChatPollTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    loadUserChat();
+  }, USER_CHAT_POLL_MS);
+  if ('IntersectionObserver' in window) {
+    userChatObserver = new IntersectionObserver((entries) => {
+      if (entries.some((en) => en.isIntersecting)) loadUserChat();
+    });
+    userChatObserver.observe(el('chat-card'));
+  }
+}
+
+function stopUserChat() {
+  if (userChatPollTimer) clearInterval(userChatPollTimer);
+  userChatPollTimer = null;
+  if (userChatObserver) userChatObserver.disconnect();
+  userChatObserver = null;
+  userChatLastId = 0;
+}
+
+el('user-chat-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = el('user-chat-send-btn');
+  const err = el('user-chat-error');
+  hideError(err);
+  const input = el('user-chat-input');
+  const body = input.value.trim();
+  if (!body) return;
+  btn.disabled = true;
+  try {
+    const data = await authApi('/api/chat/send', {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    });
+    input.value = '';
+    appendUserChatMessage(data.message);
+    userChatLastId = Math.max(userChatLastId, data.message.id);
+    scrollUserChatToBottom();
+  } catch (e2) {
+    showError(err, e2.message || 'გაგზავნა ვერ მოხერხდა.');
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 /* ---------------- Start ---------------- */

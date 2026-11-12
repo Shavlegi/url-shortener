@@ -13,7 +13,7 @@
 <main class="wrap">
   <header class="header">
     <h1>Mini Link</h1>
-    <p class="subtitle">მოკლე ბმულები &bull; QR კოდები &bull; სტატისტიკა &bull; v6.2</p>
+    <p class="subtitle">მოკლე ბმულები &bull; QR კოდები &bull; სტატისტიკა &bull; v7.0</p>
   </header>
 
   <div class="theme-picker" role="group" aria-label="თემა">
@@ -220,6 +220,23 @@
     <p id="my-links-empty" class="muted" hidden>ბმულები ჯერ არ გაქვთ — ზემოთ დაამოკლეთ პირველი ბმული.</p>
     <div id="my-links-list" class="links-list"></div>
     <p id="my-links-error" class="error" hidden></p>
+  </section>
+
+  <!-- Admin chat (v7.0): only for logged-in, email-verified users.
+       Unverified and logged-out users never see this section. -->
+  <section id="chat-card" class="card" hidden>
+    <h2>💬 ჩატი ადმინთან <span id="chat-user-unread-badge" class="badge unread" hidden>0</span></h2>
+    <p class="muted">კითხვა გაქვთ? ადმინს აქ მიწერეთ — პასუხი აქვე მოვა.</p>
+    <div id="user-chat-messages" class="chat-messages"></div>
+    <p id="user-chat-empty" class="muted">შეტყობინებები ჯერ არ არის — პირველი თქვენ მიწერეთ.</p>
+    <form id="user-chat-form">
+      <label class="field">
+        <span class="sr-only">შეტყობინება</span>
+        <textarea id="user-chat-input" rows="2" maxlength="2000" placeholder="შეტყობინება ადმინს…"></textarea>
+      </label>
+      <button type="submit" class="btn primary" id="user-chat-send-btn">გაგზავნა</button>
+      <p id="user-chat-error" class="error" hidden></p>
+    </form>
   </section>
 
   <section class="card">

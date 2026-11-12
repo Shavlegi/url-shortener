@@ -81,6 +81,13 @@ const CONFIG = {
   telegramMaxPerHour: 10, // bot link creations per hour, per user
   telegramQrMaxPerMin: 10, // bot /qr generations per minute, per user
   telegramQrMaxPerHour: 60, // bot /qr generations per hour, per user
+  // v7.0: admin chat (1:1 with email-verified users; D1 only, no R2).
+  chatMaxBodyChars: 2000, // message text cap
+  chatMaxAttachmentBytes: 1536 * 1024, // 1.5 MB decoded — D1 caps a value/row at 2 MB
+  chatUserMaxPerMin: 10, // messages per minute, per user id
+  chatUserMaxPerHour: 100, // messages per hour, per user id
+  chatAdminMaxPerMin: 30, // admin messages per minute
+  chatMaxMessages: 100, // messages returned per fetch
   mailFrom: 'Mini Link <noreply@minilink.space>',
 };
 
@@ -760,6 +767,77 @@ async function ensureV6Schema(env) {
   }
 }
 
+/* ---------------- Lazy v7.0 schema migration ---------------- */
+
+// Same idempotent pattern as v6 (see ensureV6Schema): applies
+// migrations/0007_chat.sql on first use. Adds the admin-chat tables:
+// one thread per user (chat_threads, user_id UNIQUE), text messages
+// (chat_messages — NO blob column, so listing messages never touches
+// file bytes) and file attachments in a SEPARATE table
+// (chat_attachments, data BLOB, fetched only by id for downloads).
+// Attachments are capped at 1.5 MB decoded — D1 caps a single value /
+// row at 2,000,000 bytes. No new service, no new secret: D1 only.
+let v7SchemaChecked = false;
+
+async function ensureV7Schema(env) {
+  if (v7SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v7_chat'",
+    ).first();
+    if (flag && flag.value === '7') {
+      v7SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS chat_threads (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'user_id INTEGER NOT NULL UNIQUE, ' +
+      'created_at INTEGER NOT NULL, ' +
+      'last_message_at INTEGER NOT NULL, ' +
+      'admin_unread INTEGER NOT NULL DEFAULT 0, ' +
+      'user_unread INTEGER NOT NULL DEFAULT 0)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS chat_messages (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'thread_id INTEGER NOT NULL, ' +
+      'sender TEXT NOT NULL, ' +
+      'body TEXT NOT NULL, ' +
+      'created_at INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_chat_messages_thread ON chat_messages (thread_id, id)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS chat_attachments (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'message_id INTEGER NOT NULL, ' +
+      'file_name TEXT NOT NULL, ' +
+      'mime_type TEXT NOT NULL, ' +
+      'size_bytes INTEGER NOT NULL, ' +
+      'data BLOB NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_chat_attachments_message ON chat_attachments (message_id)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v7_chat', '7')",
+    ).run();
+    v7SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v7 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
 /* ------------------------------------------------------------------ */
@@ -1372,6 +1450,178 @@ async function handleTelegramWebhook(request, env) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Admin chat (v7.0) — 1:1 threads with email-verified users           */
+/*                                                                     */
+/* One thread per user (chat_threads.user_id UNIQUE). The chat is      */
+/* visible ONLY to email-verified users — the gate is enforced         */
+/* server-side on every chat route, not by hiding UI. Users send       */
+/* TEXT only; the admin sends text + photos + files. Messages are      */
+/* plain text (chat_messages has NO blob column, so listing them       */
+/* never touches file bytes); attachments live in chat_attachments     */
+/* and are fetched only by id for downloads. D1 only — no R2, no       */
+/* new secret. Attachments are capped at 1.5 MB decoded because D1     */
+/* caps a single value / row at 2,000,000 bytes.                       */
+/* ------------------------------------------------------------------ */
+
+// File types an admin may attach. Executables, HTML, SVG and everything
+// else are blocked — a served attachment can never run as a page
+// (Content-Type comes from this allowlist + nosniff on download).
+const CHAT_ALLOWED_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  'application/pdf', 'text/plain', 'application/zip',
+]);
+
+function sanitizeChatFileName(raw) {
+  let name = String(raw || '').trim();
+  // Strip path separators, control characters and shell-sensitive chars.
+  name = name.replace(/[/\\?%*:|"<>]/g, '_').replace(/[\x00-\x1F\x7F]/g, '');
+  // Collapse dot runs (".." can never appear) and strip leading dots
+  // (hidden files) — the name can never be or contain a path traversal.
+  name = name.replace(/\.{2,}/g, '.').replace(/^\.+/, '');
+  if (!name) name = 'file';
+  if (name.length > 100) name = name.slice(0, 100);
+  return name;
+}
+
+// Validates an attachment sent as { fileName, mimeType, dataBase64 }.
+// Returns { ok: true, attachment: null } when no attachment was sent,
+// { ok: true, attachment: { fileName, mimeType, bytes, sizeBytes } },
+// or { ok: false, reason }. The decoded size is capped at 1.5 MB.
+function validateChatAttachment(raw) {
+  if (raw === undefined || raw === null) return { ok: true, attachment: null };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, reason: 'დანართი არასწორია.' };
+  }
+  const mimeType = String(raw.mimeType || '').toLowerCase().trim();
+  if (!CHAT_ALLOWED_MIME_TYPES.has(mimeType)) {
+    return { ok: false, reason: 'ფაილის ტიპი დაუშვებელია — სურათი, PDF, ტექსტი ან ZIP შეიძლება.' };
+  }
+  let b64 = String(raw.dataBase64 || '').trim();
+  // Tolerate a data: URL prefix (some clients send the whole data URL).
+  if (b64.startsWith('data:')) {
+    const comma = b64.indexOf(',');
+    if (comma === -1) return { ok: false, reason: 'ფაილი არასწორია.' };
+    b64 = b64.slice(comma + 1);
+  }
+  b64 = b64.replace(/\s+/g, '');
+  if (!b64) return { ok: false, reason: 'ფაილი ცარიელია.' };
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+    return { ok: false, reason: 'ფაილი არასწორია.' };
+  }
+  // Cheap pre-check before decoding: base64 inflates by ~4/3.
+  if (Math.floor(b64.length * 3 / 4) > CONFIG.chatMaxAttachmentBytes) {
+    return { ok: false, reason: 'ფაილი ძალიან დიდია (მაქს. 1.5 MB).' };
+  }
+  let bytes;
+  try {
+    bytes = base64ToBytes(b64);
+  } catch {
+    return { ok: false, reason: 'ფაილი არასწორია.' };
+  }
+  if (bytes.length === 0) return { ok: false, reason: 'ფაილი ცარიელია.' };
+  if (bytes.length > CONFIG.chatMaxAttachmentBytes) {
+    return { ok: false, reason: 'ფაილი ძალიან დიდია (მაქს. 1.5 MB).' };
+  }
+  return {
+    ok: true,
+    attachment: {
+      fileName: sanitizeChatFileName(raw.fileName),
+      mimeType,
+      bytes,
+      sizeBytes: bytes.length,
+    },
+  };
+}
+
+async function getOrCreateChatThread(env, userId) {
+  const existing = await env.DB.prepare(
+    'SELECT id, user_id, created_at, last_message_at, admin_unread, user_unread FROM chat_threads WHERE user_id = ?',
+  ).bind(userId).first();
+  if (existing) return existing;
+  const now = Date.now();
+  try {
+    const ins = await env.DB.prepare(
+      'INSERT INTO chat_threads (user_id, created_at, last_message_at, admin_unread, user_unread) VALUES (?, ?, ?, 0, 0)',
+    ).bind(userId, now, now).run();
+    if (ins.success) {
+      return { id: ins.meta.last_row_id, user_id: userId, created_at: now, last_message_at: now, admin_unread: 0, user_unread: 0 };
+    }
+  } catch (e) {
+    // UNIQUE race: another request created the thread first — fall
+    // through to the SELECT below. Any other error is rethrown.
+    if (!String(e && e.message ? e.message : e).includes('UNIQUE')) throw e;
+  }
+  return await env.DB.prepare(
+    'SELECT id, user_id, created_at, last_message_at, admin_unread, user_unread FROM chat_threads WHERE user_id = ?',
+  ).bind(userId).first();
+}
+
+// One message + its attachment METADATA (never the blob bytes — the
+// data column is selected only by the download endpoint).
+function chatMessageToJson(row) {
+  return {
+    id: row.id,
+    sender: row.sender,
+    body: row.body,
+    createdAt: row.created_at,
+    attachment: row.att_id ? {
+      id: row.att_id,
+      fileName: row.file_name,
+      mimeType: row.mime_type,
+      sizeBytes: row.size_bytes,
+      url: '/api/chat/attachment?id=' + row.att_id,
+    } : null,
+  };
+}
+
+// Messages of one thread, oldest first. With after > 0 (polling) only
+// messages newer than that id are returned; otherwise the newest 100.
+async function listChatMessages(env, threadId, after) {
+  const cols = 'm.id, m.sender, m.body, m.created_at, a.id AS att_id, a.file_name, a.mime_type, a.size_bytes';
+  const from = 'chat_messages m LEFT JOIN chat_attachments a ON a.message_id = m.id';
+  let rows;
+  if (after > 0) {
+    rows = await env.DB.prepare(
+      `SELECT ${cols} FROM ${from} WHERE m.thread_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT ?`,
+    ).bind(threadId, after, CONFIG.chatMaxMessages).all();
+  } else {
+    rows = await env.DB.prepare(
+      `SELECT ${cols} FROM ${from} WHERE m.thread_id = ? ORDER BY m.id DESC LIMIT ?`,
+    ).bind(threadId, CONFIG.chatMaxMessages).all();
+    (rows.results || []).reverse();
+  }
+  return (rows.results || []).map(chatMessageToJson);
+}
+
+// Inserts a message (+ optional attachment row) and bumps the OTHER
+// side's unread counter + the thread's last_message_at.
+async function insertChatMessage(env, thread, sender, body, attachment) {
+  const now = Date.now();
+  const ins = await env.DB.prepare(
+    'INSERT INTO chat_messages (thread_id, sender, body, created_at) VALUES (?, ?, ?, ?)',
+  ).bind(thread.id, sender, body, now).run();
+  const messageId = ins.meta.last_row_id;
+  let attJson = null;
+  if (attachment) {
+    const ains = await env.DB.prepare(
+      'INSERT INTO chat_attachments (message_id, file_name, mime_type, size_bytes, data) VALUES (?, ?, ?, ?, ?)',
+    ).bind(messageId, attachment.fileName, attachment.mimeType, attachment.sizeBytes, attachment.bytes.buffer).run();
+    attJson = {
+      id: ains.meta.last_row_id,
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      url: '/api/chat/attachment?id=' + ains.meta.last_row_id,
+    };
+  }
+  const unreadCol = sender === 'admin' ? 'user_unread' : 'admin_unread';
+  await env.DB.prepare(
+    `UPDATE chat_threads SET last_message_at = ?, ${unreadCol} = ${unreadCol} + 1 WHERE id = ?`,
+  ).bind(now, thread.id).run();
+  return { id: messageId, sender, body, createdAt: now, attachment: attJson };
+}
+
+/* ------------------------------------------------------------------ */
 /* Static frontend (ASSETS binding, or embedded copy in single-file build) */
 /* ------------------------------------------------------------------ */
 
@@ -1548,6 +1798,9 @@ async function handleApi(request, env, url) {
   await ensureV5Schema(env);
   // v6 schema (qr_history) — same lazy pattern, see ensureV6Schema.
   await ensureV6Schema(env);
+  // v7.0 schema (chat_threads, chat_messages, chat_attachments) — same
+  // lazy pattern, see ensureV7Schema.
+  await ensureV7Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -2041,6 +2294,120 @@ async function handleApi(request, env, url) {
     return error('მეთოდი დაუშვებელია.', 405);
   }
 
+  // --- v7.0: admin chat — user side ------------------------------------
+  // Visible ONLY to email-verified users. The gate is enforced here,
+  // server-side, on every route — hiding the UI is not the protection.
+  // Users send TEXT only; files come from the admin side. One thread
+  // per user; the user always talks to the admin.
+
+  // Download an attachment — admin session OR the owning user session.
+  // A user may download only attachments from their own thread; the
+  // admin may download any. Content-Type comes from the allowlist and
+  // nosniff is set, so a stored file can never run as a page.
+  if (path === '/api/chat/attachment') {
+    if (method !== 'GET') return error('მეთოდი დაუშვებელია.', 405);
+    const id = parseInt(url.searchParams.get('id') || '', 10);
+    if (!Number.isFinite(id) || id <= 0) return error('დანართი არ მოიძებნა.', 404);
+    const adminSession = await getSession(env, request);
+    let row = null;
+    if (adminSession) {
+      row = await env.DB.prepare(
+        'SELECT file_name, mime_type, size_bytes, data FROM chat_attachments WHERE id = ?',
+      ).bind(id).first();
+    } else {
+      const userSession = await getUserSession(env, request);
+      if (!userSession) return error('შესვლა საჭიროა.', 401);
+      if (!userSession.emailVerified) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.', 403);
+      row = await env.DB.prepare(
+        'SELECT a.file_name, a.mime_type, a.size_bytes, a.data ' +
+        'FROM chat_attachments a JOIN chat_messages m ON m.id = a.message_id ' +
+        'JOIN chat_threads t ON t.id = m.thread_id ' +
+        'WHERE a.id = ? AND t.user_id = ?',
+      ).bind(id, userSession.userId).first();
+    }
+    if (!row) return error('დანართი არ მოიძებნა.', 404);
+    const bytes = row.data instanceof ArrayBuffer ? new Uint8Array(row.data) : row.data;
+    const isImage = String(row.mime_type).startsWith('image/');
+    const asciiName = String(row.file_name).replace(/[^\x20-\x7E]/g, '_') || 'file';
+    return new Response(bytes, {
+      headers: {
+        'Content-Type': row.mime_type,
+        'Content-Length': String(row.size_bytes),
+        'Content-Disposition': (isImage ? 'inline' : 'attachment') +
+          '; filename="' + asciiName.replace(/"/g, '_') + '"' +
+          "; filename*=UTF-8''" + encodeURIComponent(row.file_name),
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, max-age=3600',
+      },
+    });
+  }
+
+  // The user's own thread + messages. `?after=<id>` (polling) returns
+  // only messages newer than that id. No thread yet -> empty result.
+  if (path === '/api/chat/thread' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.', 403);
+    const thread = await env.DB.prepare(
+      'SELECT id, user_id, created_at, last_message_at, admin_unread, user_unread FROM chat_threads WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!thread) return json({ thread: null, messages: [] });
+    const after = parseInt(url.searchParams.get('after') || '0', 10) || 0;
+    const messages = await listChatMessages(env, thread.id, after);
+    return json({
+      thread: { id: thread.id, userUnread: thread.user_unread, lastMessageAt: thread.last_message_at },
+      messages,
+    });
+  }
+
+  // Unread counter for the user's chat badge (lightweight poll).
+  if (path === '/api/chat/unread' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.', 403);
+    const thread = await env.DB.prepare(
+      'SELECT user_unread FROM chat_threads WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    return json({ unread: thread ? thread.user_unread : 0 });
+  }
+
+  // Send a text message (creates the thread on first use). Attachments
+  // are rejected here — only the admin may send files.
+  if (path === '/api/chat/send' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.', 403);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const minOk = await rateLimit(env, `chat-user:${userSession.userId}`, CONFIG.chatUserMaxPerMin, 60);
+    if (!minOk) return error('ძალიან ბევრი შეტყობინება. სცადეთ ერთ წუთში.', 429);
+    const hourOk = await rateLimit(env, `chat-user-hour:${userSession.userId}`, CONFIG.chatUserMaxPerHour, 3600);
+    if (!hourOk) return error('ლიმიტი ამოიწურა — შეტყობინების გაგზავნა ერთ საათში შეგეძლებათ.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    if (parsed.body.attachment !== undefined && parsed.body.attachment !== null) {
+      return error('ფაილის გაგზავნა მხოლოდ ადმინს შეუძლია.', 400);
+    }
+    const body = typeof parsed.body.body === 'string' ? parsed.body.body.trim() : '';
+    if (!body) return error('შეტყობინება ცარიელია.', 400);
+    if (body.length > CONFIG.chatMaxBodyChars) {
+      return error(`შეტყობინება მაქს. ${CONFIG.chatMaxBodyChars} სიმბოლო შეიძლება იყოს.`, 400);
+    }
+    const thread = await getOrCreateChatThread(env, userSession.userId);
+    if (!thread) return error('ჩატის შექმნა ვერ მოხერხდა.', 500);
+    const message = await insertChatMessage(env, thread, 'user', body, null);
+    return json({ message }, 201);
+  }
+
+  // Mark the user's own thread as read (clears their unread counter).
+  if (path === '/api/chat/read' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.', 403);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    await env.DB.prepare('UPDATE chat_threads SET user_unread = 0 WHERE user_id = ?').bind(userSession.userId).run();
+    return json({ ok: true });
+  }
+
   // --- Everything below requires a session ---------------------------
   const session = await getSession(env, request);
   if (!session) return error('შესვლა საჭიროა.', 401);
@@ -2394,6 +2761,144 @@ async function handleApi(request, env, url) {
       return json({ ok: true, linksAnonymized: (anon.meta && anon.meta.changes) || 0 });
     }
     return error('მეთოდი დაუშვებელია.', 405);
+  }
+
+  // --- v7.0: admin chat — admin side -----------------------------------
+  // Behind the admin session gate (above). One thread per user; the
+  // admin sees all threads, sends text + files, and can delete a
+  // thread (messages + attachments). The LEFT JOIN keeps threads of
+  // deleted users visible (username null) so they can still be removed.
+
+  if (path === '/api/admin/chat/threads' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT t.id, t.user_id, t.created_at, t.last_message_at, t.admin_unread, t.user_unread, ' +
+      'u.username, u.email, u.email_verified, u.disabled, ' +
+      '(SELECT body FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_body, ' +
+      '(SELECT sender FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_sender ' +
+      'FROM chat_threads t LEFT JOIN users u ON u.id = t.user_id ' +
+      'ORDER BY t.last_message_at DESC',
+    ).all();
+    return json({
+      threads: (rows.results || []).map((r) => ({
+        id: r.id,
+        userId: r.user_id,
+        username: r.username || null,
+        email: r.email || null,
+        emailVerified: r.email_verified === 1,
+        disabled: r.disabled === 1,
+        createdAt: r.created_at,
+        lastMessageAt: r.last_message_at,
+        adminUnread: r.admin_unread,
+        userUnread: r.user_unread,
+        lastBody: r.last_body || '',
+        lastSender: r.last_sender || null,
+      })),
+    });
+  }
+
+  // Send to a user by user id (creates the thread on first use). Used
+  // by the "new chat" picker and by the QR tab's "send to user" action.
+  if (path === '/api/admin/chat/send-to-user' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const adminOk = await rateLimit(env, 'chat-admin', CONFIG.chatAdminMaxPerMin, 60);
+    if (!adminOk) return error('ძალიან ბევრი შეტყობინება. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const userId = parseInt(parsed.body.userId, 10);
+    if (!Number.isFinite(userId) || userId <= 0) return error('მომხმარებელი არასწორია.', 400);
+    const user = await env.DB.prepare(
+      'SELECT id, email_verified, disabled FROM users WHERE id = ?',
+    ).bind(userId).first();
+    if (!user) return error('მომხმარებელი არ მოიძებნა.', 404);
+    if (user.email_verified !== 1) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებთან შეიძლება.', 403);
+    if (user.disabled === 1) return error('მომხმარებელი გათიშულია.', 403);
+    const body = typeof parsed.body.body === 'string' ? parsed.body.body.trim() : '';
+    const av = validateChatAttachment(parsed.body.attachment);
+    if (!av.ok) return error(av.reason, 400);
+    if (!body && !av.attachment) return error('შეტყობინება ცარიელია.', 400);
+    if (body.length > CONFIG.chatMaxBodyChars) {
+      return error(`შეტყობინება მაქს. ${CONFIG.chatMaxBodyChars} სიმბოლო შეიძლება იყოს.`, 400);
+    }
+    const thread = await getOrCreateChatThread(env, userId);
+    if (!thread) return error('ჩატის შექმნა ვერ მოხერხდა.', 500);
+    const message = await insertChatMessage(env, thread, 'admin', body, av.attachment);
+    return json({ threadId: thread.id, message }, 201);
+  }
+
+  const chatThreadMatch = path.match(/^\/api\/admin\/chat\/threads\/(\d+)$/);
+  if (chatThreadMatch) {
+    const threadId = parseInt(chatThreadMatch[1], 10);
+    const thread = await env.DB.prepare(
+      'SELECT t.id, t.user_id, t.created_at, t.last_message_at, t.admin_unread, t.user_unread, ' +
+      'u.username, u.email, u.email_verified, u.disabled ' +
+      'FROM chat_threads t LEFT JOIN users u ON u.id = t.user_id WHERE t.id = ?',
+    ).bind(threadId).first();
+    if (!thread) return error('ჩატი არ მოიძებნა.', 404);
+    if (method === 'GET') {
+      const after = parseInt(url.searchParams.get('after') || '0', 10) || 0;
+      const messages = await listChatMessages(env, threadId, after);
+      return json({
+        thread: {
+          id: thread.id,
+          userId: thread.user_id,
+          username: thread.username || null,
+          email: thread.email || null,
+          emailVerified: thread.email_verified === 1,
+          disabled: thread.disabled === 1,
+          createdAt: thread.created_at,
+          lastMessageAt: thread.last_message_at,
+          adminUnread: thread.admin_unread,
+          userUnread: thread.user_unread,
+        },
+        messages,
+      });
+    }
+    if (method === 'DELETE') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      await env.DB.prepare(
+        'DELETE FROM chat_attachments WHERE message_id IN (SELECT id FROM chat_messages WHERE thread_id = ?)',
+      ).bind(threadId).run();
+      await env.DB.prepare('DELETE FROM chat_messages WHERE thread_id = ?').bind(threadId).run();
+      await env.DB.prepare('DELETE FROM chat_threads WHERE id = ?').bind(threadId).run();
+      return json({ ok: true });
+    }
+    return error('მეთოდი დაუშვებელია.', 405);
+  }
+
+  const chatThreadSendMatch = path.match(/^\/api\/admin\/chat\/threads\/(\d+)\/send$/);
+  if (chatThreadSendMatch) {
+    if (method !== 'POST') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const adminOk = await rateLimit(env, 'chat-admin', CONFIG.chatAdminMaxPerMin, 60);
+    if (!adminOk) return error('ძალიან ბევრი შეტყობინება. სცადეთ ერთ წუთში.', 429);
+    const threadId = parseInt(chatThreadSendMatch[1], 10);
+    const thread = await env.DB.prepare(
+      'SELECT id, user_id FROM chat_threads WHERE id = ?',
+    ).bind(threadId).first();
+    if (!thread) return error('ჩატი არ მოიძებნა.', 404);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const body = typeof parsed.body.body === 'string' ? parsed.body.body.trim() : '';
+    const av = validateChatAttachment(parsed.body.attachment);
+    if (!av.ok) return error(av.reason, 400);
+    if (!body && !av.attachment) return error('შეტყობინება ცარიელია.', 400);
+    if (body.length > CONFIG.chatMaxBodyChars) {
+      return error(`შეტყობინება მაქს. ${CONFIG.chatMaxBodyChars} სიმბოლო შეიძლება იყოს.`, 400);
+    }
+    const message = await insertChatMessage(env, thread, 'admin', body, av.attachment);
+    return json({ message }, 201);
+  }
+
+  const chatThreadReadMatch = path.match(/^\/api\/admin\/chat\/threads\/(\d+)\/read$/);
+  if (chatThreadReadMatch) {
+    if (method !== 'POST') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const threadId = parseInt(chatThreadReadMatch[1], 10);
+    const res = await env.DB.prepare(
+      'UPDATE chat_threads SET admin_unread = 0 WHERE id = ?',
+    ).bind(threadId).run();
+    if (!res.success || (res.meta && res.meta.changes === 0)) return error('ჩატი არ მოიძებნა.', 404);
+    return json({ ok: true });
   }
 
   return error('არ მოიძებნა.', 404);

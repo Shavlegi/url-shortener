@@ -91,7 +91,12 @@ async function checkAuth() {
 function setAuthed(yes) {
   loginView.hidden = yes;
   appView.hidden = !yes;
-  if (yes) { loadLinks(); loadUsers(); loadQrFavoritesAdmin(); }
+  if (yes) {
+    loadLinks(); loadUsers(); loadQrFavoritesAdmin();
+    if (currentTab === 'chat') { renderChatPicker(); loadChatThreads(); startChatPolling(); }
+  } else {
+    stopChatPolling();
+  }
 }
 
 $('login-form').addEventListener('submit', async (e) => {
@@ -133,7 +138,7 @@ $('revoke-btn').addEventListener('click', async () => {
 
 /* ---------------- Tabs (admin menu) ---------------- */
 
-const TABS = ['links', 'users', 'qr', 'create', 'stats', 'settings'];
+const TABS = ['links', 'users', 'qr', 'chat', 'create', 'stats', 'settings'];
 let currentTab = 'links';
 let activityPeriod = 'today';
 
@@ -149,6 +154,17 @@ function showTab(name) {
     loadRecentClicks();
   }
   if (name === 'qr') loadQrFavoritesAdmin();
+  if (name === 'chat') {
+    // Only load when logged in (appView starts hidden; setAuthed(true)
+    // starts the chat load when the chat tab is already selected).
+    if (!appView.hidden) {
+      renderChatPicker();
+      loadChatThreads();
+      startChatPolling();
+    }
+  } else {
+    stopChatPolling();
+  }
   try { history.replaceState(null, '', '#' + name); } catch { /* ignore */ }
 }
 
@@ -519,6 +535,13 @@ function qrFavCard(fav) {
   });
   actions.appendChild(copyBtn);
 
+  // v7.0: send this QR to a verified user as a chat attachment.
+  const sendBtn = document.createElement('button');
+  sendBtn.className = 'btn small';
+  sendBtn.textContent = '💬 გაგზავნა მომხმარებელთან';
+  sendBtn.addEventListener('click', () => openQrSendModal(fav));
+  actions.appendChild(sendBtn);
+
   const delBtn = document.createElement('button');
   delBtn.className = 'btn small danger';
   delBtn.textContent = 'წაშლა';
@@ -582,6 +605,7 @@ function renderUsers() {
     list.appendChild(userCard(user));
   }
   renderStats();
+  renderChatPicker();
 }
 
 $('user-filter-clear').addEventListener('click', () => {
@@ -1254,6 +1278,449 @@ $('import-file').addEventListener('change', async (e) => {
     loadLinks();
   } catch (err) {
     toast(err.message || 'იმპორტი ვერ მოხერხდა.');
+  }
+});
+
+/* ---------------- Admin chat (v7.0) ---------------- */
+// 1:1 threads with email-verified users. The admin sends text + files
+// (photos are compressed client-side before upload, max 1.5 MB — the
+// server enforces the same cap). While the chat tab is open, the open
+// thread (or the thread list) refreshes every 5 seconds.
+const CHAT_POLL_MS = 5000;
+const CHAT_MAX_ATTACHMENT_BYTES = 1536 * 1024; // 1.5 MB, same as the server cap
+
+let chatThreads = [];
+let chatOpenThreadId = null; // thread id, or null when composing a new thread
+let chatOpenUserId = null; // user id of the open/new thread
+let chatOpenUsername = '';
+let chatLastMessageId = 0;
+let chatPollTimer = null;
+let chatPendingAttachment = null; // { fileName, mimeType, dataBase64, sizeBytes }
+let chatLoading = false;
+
+function verifiedChatUsers() {
+  return users.filter((u) => u.emailVerified && !u.disabled);
+}
+
+function renderChatBadge() {
+  const badge = $('chat-unread-badge');
+  const total = chatThreads.reduce((s, t) => s + (t.adminUnread || 0), 0);
+  badge.textContent = String(total);
+  badge.hidden = total === 0;
+}
+
+function renderChatPicker() {
+  const picker = $('chat-user-picker');
+  if (!picker) return;
+  const list = verifiedChatUsers();
+  picker.innerHTML = '';
+  if (list.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'დადასტურებული მომხმარებელი არ არის';
+    picker.appendChild(opt);
+    $('chat-start-btn').disabled = true;
+    return;
+  }
+  $('chat-start-btn').disabled = false;
+  for (const u of list) {
+    const opt = document.createElement('option');
+    opt.value = String(u.id);
+    opt.textContent = u.username + ' (' + u.email + ')';
+    picker.appendChild(opt);
+  }
+}
+
+async function loadChatThreads() {
+  const err = $('chat-error');
+  hideError(err);
+  try {
+    const data = await api('/api/admin/chat/threads');
+    chatThreads = data.threads || [];
+    renderChatThreads();
+    renderChatBadge();
+  } catch (e) {
+    showError(err, e.message || 'ჩატების ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function renderChatThreads() {
+  const list = $('chat-threads-list');
+  list.innerHTML = '';
+  $('chat-threads-empty').hidden = chatThreads.length !== 0;
+  for (const t of chatThreads) list.appendChild(chatThreadRow(t));
+}
+
+function chatThreadRow(t) {
+  const card = document.createElement('div');
+  card.className = 'link-card chat-thread-row';
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const name = document.createElement('span');
+  name.className = 'link-alias';
+  name.textContent = t.username || '(წაშლილი მომხმარებელი)';
+  top.appendChild(name);
+  if (t.adminUnread > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'badge unread';
+    badge.textContent = String(t.adminUnread);
+    top.appendChild(badge);
+  }
+  card.appendChild(top);
+  if (t.lastBody) {
+    const prev = document.createElement('p');
+    prev.className = 'chat-preview';
+    prev.textContent = (t.lastSender === 'admin' ? 'შენ: ' : '') + t.lastBody.slice(0, 120);
+    card.appendChild(prev);
+  }
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = (t.email ? t.email + ' · ' : '') + fmtDate(t.lastMessageAt);
+  card.appendChild(meta);
+  card.addEventListener('click', () => openChatThread(t.id));
+  return card;
+}
+
+function formatBytes(n) {
+  if (!Number.isFinite(n)) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+function chatMessageEl(msg, mine) {
+  const el = document.createElement('div');
+  el.className = 'chat-msg ' + (mine ? 'mine' : 'theirs');
+  if (msg.body) {
+    const p = document.createElement('div');
+    p.textContent = msg.body;
+    el.appendChild(p);
+  }
+  if (msg.attachment) {
+    const att = msg.attachment;
+    if (att.mimeType.startsWith('image/')) {
+      const img = document.createElement('img');
+      img.src = att.url;
+      img.alt = att.fileName;
+      img.loading = 'lazy';
+      el.appendChild(img);
+    }
+    const a = document.createElement('a');
+    a.className = 'chat-file';
+    a.href = att.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = '📎 ' + att.fileName + ' (' + formatBytes(att.sizeBytes) + ')';
+    el.appendChild(a);
+  }
+  const meta = document.createElement('div');
+  meta.className = 'chat-meta';
+  meta.textContent = fmtDate(msg.createdAt);
+  el.appendChild(meta);
+  return el;
+}
+
+function appendChatMessage(msg) {
+  $('chat-messages').appendChild(chatMessageEl(msg, msg.sender === 'admin'));
+  $('chat-thread-empty').hidden = true;
+}
+
+function scrollChatToBottom(force) {
+  const box = $('chat-messages');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  if (force || nearBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function openChatThread(threadId) {
+  const t = chatThreads.find((x) => x.id === threadId);
+  chatOpenThreadId = threadId;
+  chatOpenUserId = t ? t.userId : null;
+  chatOpenUsername = t ? (t.username || '(წაშლილი მომხმარებელი)') : '';
+  chatLastMessageId = 0;
+  $('chat-threads-view').hidden = true;
+  $('chat-thread-view').hidden = false;
+  $('chat-thread-title').textContent = '💬 ' + chatOpenUsername;
+  $('chat-messages').innerHTML = '';
+  $('chat-thread-empty').hidden = false;
+  $('chat-input').value = '';
+  clearChatAttachment();
+  hideError($('chat-thread-error'));
+  await refreshChatThread(true);
+}
+
+async function refreshChatThread(first) {
+  if (!chatOpenThreadId || chatLoading) return;
+  chatLoading = true;
+  try {
+    const data = await api('/api/admin/chat/threads/' + chatOpenThreadId + (chatLastMessageId ? '?after=' + chatLastMessageId : ''));
+    const messages = data.messages || [];
+    for (const m of messages) {
+      appendChatMessage(m);
+      chatLastMessageId = Math.max(chatLastMessageId, m.id);
+    }
+    if (messages.length) scrollChatToBottom(false);
+    if (data.thread && data.thread.adminUnread > 0) {
+      await api('/api/admin/chat/threads/' + chatOpenThreadId + '/read', { method: 'POST', body: '{}' });
+      const t = chatThreads.find((x) => x.id === chatOpenThreadId);
+      if (t) t.adminUnread = 0;
+      renderChatBadge();
+    }
+  } catch (e) {
+    if (first) showError($('chat-thread-error'), e.message || 'ჩატის ჩატვირთვა ვერ მოხერხდა.');
+  } finally {
+    chatLoading = false;
+  }
+}
+
+function startChatPolling() {
+  stopChatPolling();
+  chatPollTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (currentTab !== 'chat') return;
+    if (chatOpenThreadId) refreshChatThread(false);
+    else loadChatThreads();
+  }, CHAT_POLL_MS);
+}
+
+function stopChatPolling() {
+  if (chatPollTimer) clearInterval(chatPollTimer);
+  chatPollTimer = null;
+}
+
+async function sendChatMessage() {
+  const btn = $('chat-send-btn');
+  const err = $('chat-thread-error');
+  hideError(err);
+  const body = $('chat-input').value.trim();
+  if (!body && !chatPendingAttachment) {
+    showError(err, 'შეტყობინება დაწერეთ ან ფაილი აირჩიეთ.');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    let data;
+    if (chatOpenThreadId) {
+      data = await api('/api/admin/chat/threads/' + chatOpenThreadId + '/send', {
+        method: 'POST',
+        body: JSON.stringify({ body, attachment: chatPendingAttachment || undefined }),
+      });
+    } else if (chatOpenUserId) {
+      data = await api('/api/admin/chat/send-to-user', {
+        method: 'POST',
+        body: JSON.stringify({ userId: chatOpenUserId, body, attachment: chatPendingAttachment || undefined }),
+      });
+      chatOpenThreadId = data.threadId;
+      loadChatThreads(); // refresh the list in the background
+    } else {
+      return;
+    }
+    $('chat-input').value = '';
+    clearChatAttachment();
+    appendChatMessage(data.message);
+    chatLastMessageId = Math.max(chatLastMessageId, data.message.id);
+    scrollChatToBottom(true);
+  } catch (e) {
+    showError(err, e.message || 'გაგზავნა ვერ მოხერხდა.');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('chat-send-btn').addEventListener('click', sendChatMessage);
+
+$('chat-start-btn').addEventListener('click', () => {
+  const userId = parseInt($('chat-user-picker').value, 10);
+  if (!userId) return;
+  // A thread already exists for this user — open it instead.
+  const existing = chatThreads.find((t) => t.userId === userId);
+  if (existing) { openChatThread(existing.id); return; }
+  const u = users.find((x) => x.id === userId);
+  chatOpenThreadId = null;
+  chatOpenUserId = userId;
+  chatOpenUsername = u ? u.username : '';
+  chatLastMessageId = 0;
+  $('chat-threads-view').hidden = true;
+  $('chat-thread-view').hidden = false;
+  $('chat-thread-title').textContent = '💬 ' + chatOpenUsername;
+  $('chat-messages').innerHTML = '';
+  $('chat-thread-empty').hidden = false;
+  $('chat-input').value = '';
+  clearChatAttachment();
+  hideError($('chat-thread-error'));
+});
+
+$('chat-back-btn').addEventListener('click', () => {
+  chatOpenThreadId = null;
+  chatOpenUserId = null;
+  $('chat-thread-view').hidden = true;
+  $('chat-threads-view').hidden = false;
+  loadChatThreads();
+});
+
+$('chat-delete-btn').addEventListener('click', async () => {
+  if (!chatOpenThreadId) return;
+  if (!window.confirm('ნამდვილად წავშალო ჩატი „' + chatOpenUsername + '"-თან? ყველა შეტყობინება და ფაილი წაიშლება.')) return;
+  try {
+    await api('/api/admin/chat/threads/' + chatOpenThreadId, { method: 'DELETE' });
+    toast('ჩატი წაიშალა');
+    chatOpenThreadId = null;
+    chatOpenUserId = null;
+    $('chat-thread-view').hidden = true;
+    $('chat-threads-view').hidden = false;
+    loadChatThreads();
+  } catch (e) { toast(e.message || 'შეცდომა'); }
+});
+
+/* ---------------- Chat attachments (client-side) ---------------- */
+
+const CHAT_CLIENT_ALLOWED = {
+  'image/png': true, 'image/jpeg': true, 'image/gif': true, 'image/webp': true,
+  'application/pdf': true, 'text/plain': true, 'application/zip': true,
+};
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('ფაილის წაკითხვა ვერ მოხერხდა.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('სურათის ჩატვირთვა ვერ მოხერხდა.'));
+    img.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) resolve(blob);
+      else reject(new Error('სურათის დამუშავება ვერ მოხერხდა.'));
+    }, type, quality);
+  });
+}
+
+// Photos are compressed client-side (max side 1600px, JPEG ~0.85) so a
+// phone photo fits the 1.5 MB server cap. GIFs keep animation (no
+// recompress); PDFs, text and ZIP pass through unchanged.
+async function prepareChatAttachment(file) {
+  const mime = (file.type || '').toLowerCase();
+  if (!CHAT_CLIENT_ALLOWED[mime]) {
+    throw new Error('ფაილის ტიპი დაუშვებელია — სურათი, PDF, ტექსტი ან ZIP შეიძლება.');
+  }
+  let blob = file;
+  let outMime = mime;
+  let outName = file.name;
+  if ((mime === 'image/png' || mime === 'image/jpeg' || mime === 'image/webp') && file.size > 300 * 1024) {
+    const dataUrl = await readFileAsDataUrl(file);
+    const img = await loadImageElement(dataUrl);
+    const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    blob = await canvasToBlob(canvas, 'image/jpeg', 0.85);
+    outMime = 'image/jpeg';
+    outName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+  }
+  if (blob.size > CHAT_MAX_ATTACHMENT_BYTES) {
+    throw new Error('ფაილი ძალიან დიდია (მაქს. 1.5 MB).');
+  }
+  const dataUrl = await readFileAsDataUrl(blob);
+  const base64 = String(dataUrl).split(',')[1] || '';
+  return { fileName: outName, mimeType: outMime, dataBase64: base64, sizeBytes: blob.size };
+}
+
+function clearChatAttachment() {
+  chatPendingAttachment = null;
+  $('chat-file-input').value = '';
+  $('chat-attach-line').hidden = true;
+  $('chat-attach-name').textContent = '';
+}
+
+$('chat-attach-btn').addEventListener('click', () => $('chat-file-input').click());
+$('chat-attach-clear').addEventListener('click', clearChatAttachment);
+
+$('chat-file-input').addEventListener('change', async () => {
+  const file = $('chat-file-input').files && $('chat-file-input').files[0];
+  if (!file) return;
+  const err = $('chat-thread-error');
+  hideError(err);
+  try {
+    chatPendingAttachment = await prepareChatAttachment(file);
+    $('chat-attach-name').textContent = chatPendingAttachment.fileName + ' (' + formatBytes(chatPendingAttachment.sizeBytes) + ')';
+    $('chat-attach-line').hidden = false;
+  } catch (e) {
+    clearChatAttachment();
+    showError(err, e.message || 'ფაილის მომზადება ვერ მოხერხდა.');
+  }
+});
+
+/* ---------------- QR -> user (v7.0) ---------------- */
+// From the QR tab, the admin sends a generated QR to a verified user:
+// the QR is rendered at 512px (same as the Maker's PNG download) and
+// delivered as a chat attachment. QR PNGs are tiny — no compression.
+let qrSendFav = null;
+
+function openQrSendModal(fav) {
+  qrSendFav = fav;
+  const picker = $('qr-send-user');
+  picker.innerHTML = '';
+  const list = verifiedChatUsers();
+  if (list.length === 0) {
+    toast('დადასტურებული მომხმარებელი არ არის');
+    return;
+  }
+  for (const u of list) {
+    const opt = document.createElement('option');
+    opt.value = String(u.id);
+    opt.textContent = u.username + ' (' + u.email + ')';
+    picker.appendChild(opt);
+  }
+  $('qr-send-label').textContent = fav.label + ' — ' + fav.payload;
+  $('qr-send-message').value = '';
+  $('qr-send-modal').hidden = false;
+}
+
+$('qr-send-close').addEventListener('click', () => { $('qr-send-modal').hidden = true; });
+$('qr-send-modal').addEventListener('click', (e) => {
+  if (e.target === $('qr-send-modal')) $('qr-send-modal').hidden = true;
+});
+
+$('qr-send-submit').addEventListener('click', async () => {
+  if (!qrSendFav) return;
+  const btn = $('qr-send-submit');
+  btn.disabled = true;
+  try {
+    const canvas = document.createElement('canvas');
+    drawQr(canvas, qrSendFav.payload, 512, { fg: qrSendFav.fg, bg: qrSendFav.bg });
+    const blob = await canvasToBlob(canvas, 'image/png');
+    if (blob.size > CHAT_MAX_ATTACHMENT_BYTES) throw new Error('QR ფაილი ძალიან დიდია.');
+    const dataUrl = await readFileAsDataUrl(blob);
+    const base64 = String(dataUrl).split(',')[1] || '';
+    const name = (qrSendFav.label || 'qr').replace(/[^A-Za-z0-9ა-ჰ]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'qr';
+    await api('/api/admin/chat/send-to-user', {
+      method: 'POST',
+      body: JSON.stringify({
+        userId: parseInt($('qr-send-user').value, 10),
+        body: $('qr-send-message').value.trim(),
+        attachment: { fileName: name + '-qr.png', mimeType: 'image/png', dataBase64: base64 },
+      }),
+    });
+    $('qr-send-modal').hidden = true;
+    toast('QR მომხმარებელს გაეგზავნა');
+  } catch (e) {
+    toast(e.message || 'გაგზავნა ვერ მოხერხდა.');
+  } finally {
+    btn.disabled = false;
   }
 });
 
