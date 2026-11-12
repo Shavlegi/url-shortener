@@ -171,34 +171,12 @@ for (const t of TABS) {
   $('tabbtn-' + t).addEventListener('click', () => showTab(t));
 }
 
-/* ---------------- Theme ---------------- */
-// Three themes (black / dark blue / white), saved per device in localStorage.
-// The inline script in admin.html already applied the saved theme before
-// first paint; here we only sync the picker buttons and the label.
-const THEMES = ['black', 'blue', 'white'];
-const THEME_NAMES = { black: 'შავი', blue: 'მუქი ლურჯი', white: 'თეთრი' };
-
-function applyTheme(name) {
-  if (!THEMES.includes(name)) name = 'black';
-  document.body.classList.remove('theme-black', 'theme-blue');
-  if (name !== 'white') document.body.classList.add('theme-' + name);
-  try { localStorage.setItem('minilink-theme', name); } catch { /* ignore */ }
-  for (const th of THEMES) {
-    const b = $('theme-' + th);
-    if (b) b.classList.toggle('active', th === name);
-  }
-  const label = $('theme-name');
-  if (label) label.textContent = THEME_NAMES[name];
-}
-
-for (const th of THEMES) {
-  const b = $('theme-' + th);
-  if (b) b.addEventListener('click', () => applyTheme(th));
-}
-
+/* v7.2: single lilac-black theme for everyone — the theme picker was
+   removed. Drop any stale saved theme so old devices get the one theme. */
 try {
-  applyTheme(localStorage.getItem('minilink-theme') || 'black');
-} catch { applyTheme('black'); }
+  localStorage.removeItem('minilink-theme');
+  document.body.classList.remove('theme-black', 'theme-blue', 'theme-white');
+} catch { /* ignore */ }
 
 /* ---------------- Links ---------------- */
 

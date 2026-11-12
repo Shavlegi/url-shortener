@@ -45,31 +45,12 @@ async function copyText(text) {
   }
 }
 
-/* ---------------- Theme ---------------- */
-// Three themes (black / dark blue / white), saved per device in localStorage.
-// The inline script in index.html already applied the saved theme before
-// first paint; here we only sync the picker buttons.
-const THEMES = ['black', 'blue', 'white'];
-
-function applyTheme(name) {
-  if (!THEMES.includes(name)) name = 'white';
-  document.body.classList.remove('theme-black', 'theme-blue');
-  if (name !== 'white') document.body.classList.add('theme-' + name);
-  try { localStorage.setItem('minilink-theme', name); } catch { /* ignore */ }
-  for (const th of THEMES) {
-    const b = $('theme-' + th);
-    if (b) b.classList.toggle('active', th === name);
-  }
-}
-
-for (const th of THEMES) {
-  const b = $('theme-' + th);
-  if (b) b.addEventListener('click', () => applyTheme(th));
-}
-
+/* v7.2: single lilac-black theme for everyone — the theme picker was
+   removed. Drop any stale saved theme so old devices get the one theme. */
 try {
-  applyTheme(localStorage.getItem('minilink-theme') || 'white');
-} catch { applyTheme('white'); }
+  localStorage.removeItem('minilink-theme');
+  document.body.classList.remove('theme-black', 'theme-blue', 'theme-white');
+} catch { /* ignore */ }
 
 /* ---------------- Share buttons ---------------- */
 // One-tap share of a short link: WhatsApp / Telegram / Facebook open in

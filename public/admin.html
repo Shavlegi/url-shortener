@@ -8,11 +8,10 @@
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-<script>try{var t=localStorage.getItem('minilink-theme')||'black';if(t!=='white')document.body.classList.add('theme-'+t);}catch(e){}</script>
 <main class="wrap">
   <header class="header">
     <h1>Mini Link</h1>
-    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა &bull; v7.1</p>
+    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა &bull; v7.2</p>
   </header>
 
   <!-- Login (shown when logged out) -->
@@ -211,13 +210,6 @@
         <button id="settings-logout-btn" class="btn danger-outline">გასვლა</button>
       </div>
       <p class="muted">ადმინის პაროლი იცვლება Cloudflare-ის დეშბორდში: Workers → url-shortener → Settings → Variables → ADMIN_PASSWORD_HASH.</p>
-      <h3>თემა</h3>
-      <div class="theme-picker" role="group" aria-label="თემა">
-        <button id="theme-black" class="theme-swatch" type="button" data-theme="black" title="შავი" aria-label="შავი თემა"></button>
-        <button id="theme-blue" class="theme-swatch" type="button" data-theme="blue" title="მუქი ლურჯი" aria-label="მუქი ლურჯი თემა"></button>
-        <button id="theme-white" class="theme-swatch" type="button" data-theme="white" title="თეთრი" aria-label="თეთრი თემა"></button>
-        <span class="muted" id="theme-name">შავი</span>
-      </div>
     </section>
   </section>
 
