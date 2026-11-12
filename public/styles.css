@@ -248,7 +248,7 @@ body.theme-black input[type="color"], body.theme-blue input[type="color"] {
   background: #0b1530; color: #fff; border-color: var(--border);
 }
 
-/* v7.0: admin chat — message bubbles, unread badges, user picker. */
+/* v7.0/v7.1: admin chat — message bubbles, unread badges, users list, "+" pickers. */
 .chat-messages {
   display: flex; flex-direction: column; gap: 8px;
   max-height: 420px; overflow-y: auto; padding: 8px 2px; margin: 4px 0 12px;
@@ -264,8 +264,11 @@ body.theme-black input[type="color"], body.theme-blue input[type="color"] {
 .chat-msg a.chat-file { color: inherit; font-weight: 600; }
 .chat-msg.mine a.chat-file { color: var(--primary-text); }
 .badge.unread { background: var(--danger); color: #fff; }
-.chat-picker-row { display: flex; gap: 8px; margin-bottom: 12px; }
-.chat-picker-row select { flex: 1; min-width: 0; }
-.chat-thread-row { cursor: pointer; }
-.chat-thread-row:hover { border-color: var(--accent); }
+.chat-user-row { cursor: pointer; }
+.chat-user-row:hover { border-color: var(--accent); }
 .chat-preview { margin: 4px 0 0; font-size: 0.93rem; color: var(--muted); word-break: break-word; }
+.chat-plus-actions { flex-direction: column; align-items: stretch; }
+.chat-plus-actions .btn { width: 100%; }
+.picker-list { max-height: 46vh; overflow-y: auto; }
+.picker-row { cursor: pointer; }
+.picker-row:hover { border-color: var(--accent); }

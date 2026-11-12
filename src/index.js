@@ -1533,6 +1533,35 @@ function validateChatAttachment(raw) {
   };
 }
 
+// Validates a URL the admin sends from the chat "+" menu ("ლინკი").
+// Lighter than the link-shortening validator: https only, well-formed,
+// no credentials. The URL is stored as the message text itself.
+// Returns { ok: true, url: null } when no link was sent,
+// { ok: true, url } with the trimmed URL, or { ok: false, reason }.
+function validateChatLinkUrl(raw) {
+  if (raw === undefined || raw === null) return { ok: true, url: null };
+  if (typeof raw !== 'string') return { ok: false, reason: 'ლინკი არასწორია.' };
+  const value = raw.trim();
+  if (!value) return { ok: true, url: null };
+  if (value.length > CONFIG.chatMaxBodyChars) {
+    return { ok: false, reason: 'ლინკი ძალიან გრძელია.' };
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return { ok: false, reason: 'ლინკი არასწორია — სრული https მისამართი ჩაწერეთ.' };
+  }
+  if (parsed.protocol !== 'https:') {
+    return { ok: false, reason: 'მხოლოდ https ლინკი შეიძლება.' };
+  }
+  if (parsed.username || parsed.password) {
+    return { ok: false, reason: 'ლინკში მომხმარებლის სახელი/პაროლი არ შეიძლება.' };
+  }
+  if (!parsed.hostname) return { ok: false, reason: 'ლინკი არასწორია.' };
+  return { ok: true, url: value };
+}
+
 async function getOrCreateChatThread(env, userId) {
   const existing = await env.DB.prepare(
     'SELECT id, user_id, created_at, last_message_at, admin_unread, user_unread FROM chat_threads WHERE user_id = ?',
@@ -2763,11 +2792,14 @@ async function handleApi(request, env, url) {
     return error('მეთოდი დაუშვებელია.', 405);
   }
 
-  // --- v7.0: admin chat — admin side -----------------------------------
+  // --- v7.0/v7.1: admin chat — admin side ---------------------------
   // Behind the admin session gate (above). One thread per user; the
-  // admin sees all threads, sends text + files, and can delete a
-  // thread (messages + attachments). The LEFT JOIN keeps threads of
+  // admin sees all threads, sends text + files + links, and can delete
+  // a thread (messages + attachments). The LEFT JOIN keeps threads of
   // deleted users visible (username null) so they can still be removed.
+  // v7.1: the users list (GET /api/admin/chat/users) is the primary
+  // view; threads are created empty via POST /api/admin/chat/threads
+  // on the first explicit send — opening a chat never sends anything.
 
   if (path === '/api/admin/chat/threads' && method === 'GET') {
     const rows = await env.DB.prepare(
@@ -2796,12 +2828,44 @@ async function handleApi(request, env, url) {
     });
   }
 
-  // Send to a user by user id (creates the thread on first use). Used
-  // by the "new chat" picker and by the QR tab's "send to user" action.
-  if (path === '/api/admin/chat/send-to-user' && method === 'POST') {
+  // v7.1: every email-verified, enabled user with their thread
+  // summary (if any) — the chat tab's users list. Unverified and
+  // disabled users never appear. Users with threads come first,
+  // most recent first; users without a thread follow, by username.
+  // Read-only: listing never creates threads or messages.
+  if (path === '/api/admin/chat/users' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT u.id, u.username, u.email, ' +
+      't.id AS thread_id, t.last_message_at, t.admin_unread, t.user_unread, ' +
+      '(SELECT body FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_body, ' +
+      '(SELECT sender FROM chat_messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) AS last_sender ' +
+      'FROM users u LEFT JOIN chat_threads t ON t.user_id = u.id ' +
+      'WHERE u.email_verified = 1 AND u.disabled = 0 ' +
+      'ORDER BY CASE WHEN t.id IS NULL THEN 1 ELSE 0 END, t.last_message_at DESC, u.username ASC',
+    ).all();
+    return json({
+      users: (rows.results || []).map((r) => ({
+        id: r.id,
+        username: r.username,
+        email: r.email,
+        threadId: r.thread_id || null,
+        lastMessageAt: r.last_message_at || null,
+        adminUnread: r.admin_unread || 0,
+        userUnread: r.user_unread || 0,
+        lastBody: r.last_body || '',
+        lastSender: r.last_sender || null,
+      })),
+    });
+  }
+
+  // v7.1: create (or get) the empty thread row for a user. Creates
+  // ONLY the row — never a message. The admin UI calls this on the
+  // first explicit send to a user with no thread yet; opening a chat
+  // is read-only and never calls it.
+  if (path === '/api/admin/chat/threads' && method === 'POST') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
-    const adminOk = await rateLimit(env, 'chat-admin', CONFIG.chatAdminMaxPerMin, 60);
-    if (!adminOk) return error('ძალიან ბევრი შეტყობინება. სცადეთ ერთ წუთში.', 429);
+    const threadOk = await rateLimit(env, 'chat-admin-thread', CONFIG.chatAdminMaxPerMin, 60);
+    if (!threadOk) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
     const parsed = await readJson(request);
     if (!parsed.ok) return error(parsed.reason, 400);
     const userId = parseInt(parsed.body.userId, 10);
@@ -2812,17 +2876,9 @@ async function handleApi(request, env, url) {
     if (!user) return error('მომხმარებელი არ მოიძებნა.', 404);
     if (user.email_verified !== 1) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებთან შეიძლება.', 403);
     if (user.disabled === 1) return error('მომხმარებელი გათიშულია.', 403);
-    const body = typeof parsed.body.body === 'string' ? parsed.body.body.trim() : '';
-    const av = validateChatAttachment(parsed.body.attachment);
-    if (!av.ok) return error(av.reason, 400);
-    if (!body && !av.attachment) return error('შეტყობინება ცარიელია.', 400);
-    if (body.length > CONFIG.chatMaxBodyChars) {
-      return error(`შეტყობინება მაქს. ${CONFIG.chatMaxBodyChars} სიმბოლო შეიძლება იყოს.`, 400);
-    }
     const thread = await getOrCreateChatThread(env, userId);
     if (!thread) return error('ჩატის შექმნა ვერ მოხერხდა.', 500);
-    const message = await insertChatMessage(env, thread, 'admin', body, av.attachment);
-    return json({ threadId: thread.id, message }, 201);
+    return json({ threadId: thread.id });
   }
 
   const chatThreadMatch = path.match(/^\/api\/admin\/chat\/threads\/(\d+)$/);
@@ -2879,13 +2935,20 @@ async function handleApi(request, env, url) {
     const parsed = await readJson(request);
     if (!parsed.ok) return error(parsed.reason, 400);
     const body = typeof parsed.body.body === 'string' ? parsed.body.body.trim() : '';
+    // v7.1: a link from the "+" menu arrives as linkUrl and is stored
+    // as the message text. It is exclusive — a link goes out as its
+    // own message, never bundled with text or a file.
+    const lv = validateChatLinkUrl(parsed.body.linkUrl);
+    if (!lv.ok) return error(lv.reason, 400);
     const av = validateChatAttachment(parsed.body.attachment);
     if (!av.ok) return error(av.reason, 400);
-    if (!body && !av.attachment) return error('შეტყობინება ცარიელია.', 400);
-    if (body.length > CONFIG.chatMaxBodyChars) {
+    if (lv.url && (body || av.attachment)) return error('ლინკი ცალკე შეტყობინებად იგზავნება.', 400);
+    const finalBody = lv.url || body;
+    if (!finalBody && !av.attachment) return error('შეტყობინება ცარიელია.', 400);
+    if (finalBody.length > CONFIG.chatMaxBodyChars) {
       return error(`შეტყობინება მაქს. ${CONFIG.chatMaxBodyChars} სიმბოლო შეიძლება იყოს.`, 400);
     }
-    const message = await insertChatMessage(env, thread, 'admin', body, av.attachment);
+    const message = await insertChatMessage(env, thread, 'admin', finalBody, av.attachment);
     return json({ message }, 201);
   }
 
