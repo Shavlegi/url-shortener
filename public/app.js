@@ -138,7 +138,7 @@ $('revoke-btn').addEventListener('click', async () => {
 
 /* ---------------- Tabs (admin menu) ---------------- */
 
-const TABS = ['links', 'users', 'qr', 'visitors', 'chat', 'create', 'stats', 'settings'];
+const TABS = ['links', 'users', 'qr', 'visitors', 'security', 'chat', 'create', 'stats', 'settings'];
 let currentTab = 'links';
 let activityPeriod = 'today';
 
@@ -158,6 +158,7 @@ function showTab(name) {
   }
   if (name === 'qr') loadQrFavoritesAdmin();
   if (name === 'visitors') { loadVisitors(); loadExclusions(); }
+  if (name === 'security') loadSecurityEvents();
   if (name === 'chat') {
     // Only load when logged in (appView starts hidden; setAuthed(true)
     // starts the chat load when the chat tab is already selected).
@@ -1097,6 +1098,96 @@ for (const [id, days] of Object.entries(CLEANUP_BTNS)) {
     } catch (e) { toast(e.message || 'შეცდომა'); }
   });
 }
+
+/* ---------------- Security event log (v10.6) ---------------- */
+// Admin-only: failed logins, rate-limited logins, Turnstile failures,
+// wrong email codes, blocked destinations. Newest first.
+let securityEvents = [];
+let securityTotal = 0;
+
+const SECURITY_TYPE_LABELS = {
+  login_failed: '❌ წარუმატებელი შესვლა',
+  login_rate_limited: '⏱ ლიმიტი (შესვლა)',
+  turnstile_failed: '🤖 Turnstile ჩავარდა',
+  code_failed: '🔢 არასწორი კოდი',
+  blocked_url: '🚫 დაბლოკილი ბმული',
+};
+
+async function loadSecurityEvents() {
+  const err = $('security-error');
+  hideError(err);
+  const type = $('security-type-select').value;
+  const params = new URLSearchParams();
+  if (type) params.set('type', type);
+  params.set('limit', '100');
+  try {
+    const data = await api('/api/admin/security-events?' + params.toString());
+    securityEvents = data.events || [];
+    securityTotal = data.total || 0;
+    renderSecurityEvents();
+  } catch (e) {
+    showError(err, e.message || 'უსაფრთხოების ლოგის ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function renderSecurityEvents() {
+  const list = $('security-list');
+  list.innerHTML = '';
+  $('security-totals').textContent = 'სულ ' + securityTotal + ' ჩანაწერი';
+  $('security-empty').hidden = securityEvents.length !== 0;
+  for (const ev of securityEvents) {
+    list.appendChild(securityEventCard(ev));
+  }
+}
+
+function securityEventCard(ev) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const label = document.createElement('span');
+  label.className = 'link-alias';
+  label.textContent = SECURITY_TYPE_LABELS[ev.type] || ev.type;
+  top.appendChild(label);
+  card.appendChild(top);
+
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = fmtDate(ev.createdAt) + ' · IP: ' + ev.ip;
+  card.appendChild(meta);
+
+  if (ev.detail) {
+    const detail = document.createElement('p');
+    detail.className = 'link-meta';
+    detail.textContent = ev.detail;
+    card.appendChild(detail);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'link-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn small';
+  copyBtn.textContent = 'კოპირება';
+  copyBtn.addEventListener('click', async () => {
+    if (await copyText(ev.ip)) toast('IP დაკოპირდა');
+    else toast('კოპირება ვერ მოხერხდა');
+  });
+  actions.appendChild(copyBtn);
+  card.appendChild(actions);
+  return card;
+}
+
+$('security-type-select').addEventListener('change', loadSecurityEvents);
+
+$('security-clear-btn').addEventListener('click', async () => {
+  if (!window.confirm('ნამდვილად გაასუფთავო უსაფრთხოების ლოგის მთლიანი სია? ეს მოქმედება უკან ვერ დაბრუნდება.')) return;
+  try {
+    const data = await api('/api/admin/security-events', { method: 'DELETE' });
+    toast('გასუფთავდა: ' + (data.deleted || 0) + ' ჩანაწერი');
+    loadSecurityEvents();
+  } catch (e) { toast(e.message || 'შეცდომა'); }
+});
 
 /* ---------------- IP exclusions (v10.1) ---------------- */
 // Admin-managed: visits from these IPs are never recorded.

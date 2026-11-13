@@ -68,6 +68,9 @@ const CONFIG = {
   eventMaxPerHour: 600, // v10.4: behavior events, per IP
   maxVisitEvents: 5000, // v10.4: visit_events cap (newest kept)
   visitorNoteMaxChars: 500, // v10.4: admin note per visitor IP
+  securityLogRetentionMs: 90 * 24 * 3600 * 1000, // v10.6: security events auto-delete after 90 days
+  maxSecurityEvents: 5000, // v10.6: security_events cap (newest kept)
+  securityEventDetailMax: 200, // v10.6: security event detail cap, chars
   maxImportLinks: 500,
   // v2: user accounts (voluntary — anonymous shortening stays as-is).
   usernameMin: 3,
@@ -1194,6 +1197,49 @@ async function ensureV14Schema(env) {
   } catch (e) {
     // Flag stays unset — the next request retries the migration.
     console.error('v14 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
+let v15SchemaChecked = false;
+
+async function ensureV15Schema(env) {
+  if (v15SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v15_security_events'",
+    ).first();
+    if (flag && flag.value === '15') {
+      v15SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS security_events (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'ip TEXT NOT NULL, ' +
+      'type TEXT NOT NULL, ' +
+      'detail TEXT, ' +
+      'created_at INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_security_events_ip ON security_events(ip, created_at DESC)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v15_security_events', '15')",
+    ).run();
+    v15SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v15 schema migration failed:', e && e.message ? e.message : e);
   }
 }
 
@@ -2534,6 +2580,43 @@ function primaryLanguage(request) {
    CONFIG.visitorRetentionMs are pruned on every recorded visit.
    recordVisit never throws — a logging failure must never break the
    visitor's response. */
+// v10.6: security event log (admin-only). Records failed logins,
+// rate-limited login attempts, Turnstile failures, wrong email codes and
+// blocked destinations. Excluded IPs are never recorded (same rule as
+// visits). No usernames or emails are ever stored here — only the event
+// type, a fixed detail string and the IP. Never throws: logging must
+// never break the request it logs.
+const SECURITY_EVENT_TYPES = new Set(['login_failed', 'login_rate_limited', 'turnstile_failed', 'code_failed', 'blocked_url']);
+
+async function logSecurityEvent(env, request, type, detail) {
+  try {
+    if (!SECURITY_EVENT_TYPES.has(type)) return;
+    const ip = request.headers.get('CF-Connecting-IP');
+    if (!ip || ip === 'unknown' || ip.length > 45) return;
+    await ensureV11Schema(env);
+    await ensureV15Schema(env);
+    const excluded = await env.DB.prepare(
+      'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
+    ).bind(ip).first();
+    if (excluded) return;
+    const now = Date.now();
+    const cleanDetail = detail ? String(detail).slice(0, CONFIG.securityEventDetailMax) : null;
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO security_events (ip, type, detail, created_at) VALUES (?, ?, ?, ?)',
+      ).bind(ip, type, cleanDetail, now),
+      env.DB.prepare(
+        'DELETE FROM security_events WHERE created_at < ?',
+      ).bind(now - CONFIG.securityLogRetentionMs),
+      env.DB.prepare(
+        'DELETE FROM security_events WHERE id NOT IN (SELECT id FROM security_events ORDER BY id DESC LIMIT ?)',
+      ).bind(CONFIG.maxSecurityEvents),
+    ]);
+  } catch {
+    // Logging is best-effort; the request itself already got its answer.
+  }
+}
+
 async function recordVisit(env, request, path) {
   try {
     const ua = request.headers.get('User-Agent');
@@ -2764,6 +2847,8 @@ async function handleApi(request, env, url) {
   await ensureV13Schema(env);
   // v10.4 schema (visitors note + visit_events) — same lazy pattern, see ensureV14Schema.
   await ensureV14Schema(env);
+  // v10.6 schema (security_events) — same lazy pattern, see ensureV15Schema.
+  await ensureV15Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -2779,13 +2864,19 @@ async function handleApi(request, env, url) {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const hash = await ipHash(request, env);
     const allowed = await rateLimit(env, `login:${hash}`, CONFIG.loginMaxAttempts, CONFIG.loginWindowSec);
-    if (!allowed) return error('ძალიან ბევრი მცდელობა. სცადეთ 10 წუთში.', 429);
+    if (!allowed) {
+      await logSecurityEvent(env, request, 'login_rate_limited', 'admin');
+      return error('ძალიან ბევრი მცდელობა. სცადეთ 10 წუთში.', 429);
+    }
     const parsed = await readJson(request);
     if (!parsed.ok) return error(parsed.reason, 400);
     const password = parsed.body.password;
     if (typeof password !== 'string' || !password) return error('პაროლი შეიყვანეთ.', 400);
     const ok = await verifyPassword(password, env.ADMIN_PASSWORD_HASH || '');
-    if (!ok) return error('პაროლი არასწორია.', 401);
+    if (!ok) {
+      await logSecurityEvent(env, request, 'login_failed', 'admin');
+      return error('პაროლი არასწორია.', 401);
+    }
     const { token, expiresAt } = await createSession(env);
     const secure = new URL(request.url).protocol === 'https:';
     return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie(token, expiresAt, secure) });
@@ -2812,11 +2903,17 @@ async function handleApi(request, env, url) {
     if (!parsed.ok) return error(parsed.reason, 400);
     // Turnstile (only when the secret is configured — see verifyTurnstile).
     const human = await verifyTurnstile(env, parsed.body.turnstileToken);
-    if (!human) return error('დაადასტურეთ, რომ ადამიანი ხართ.', 400);
+    if (!human) {
+      await logSecurityEvent(env, request, 'turnstile_failed', null);
+      return error('დაადასტურეთ, რომ ადამიანი ხართ.', 400);
+    }
     const nv = validateNote(parsed.body.note);
     if (!nv.ok) return error(nv.reason, 400);
     const v = validateDestination(parsed.body.destination, ownHosts(request));
-    if (!v.ok) return error(v.reason, 400);
+    if (!v.ok) {
+      await logSecurityEvent(env, request, 'blocked_url', v.reason);
+      return error(v.reason, 400);
+    }
     // v2: a logged-in user gets the link in their own space; logged-out
     // visitors keep creating anonymous links exactly as before.
     let ownerId = null;
@@ -2900,7 +2997,10 @@ async function handleApi(request, env, url) {
       });
     }
     const check = await verifyEmailCode(env, user.id, 'verify', code);
-    if (!check.ok) return error(check.reason, 400);
+    if (!check.ok) {
+      await logSecurityEvent(env, request, 'code_failed', 'verify');
+      return error(check.reason, 400);
+    }
     await env.DB.prepare('UPDATE users SET email_verified = 1 WHERE id = ?').bind(user.id).run();
     const sess = await createUserSession(env, user.id);
     const fresh = await env.DB.prepare(
@@ -2946,15 +3046,24 @@ async function handleApi(request, env, url) {
     const ipH = await ipHash(request, env);
     const loginKey = await sha256Hex(login.toLowerCase() + '|' + ipH);
     const allowed = await rateLimit(env, `user-login:${loginKey}`, CONFIG.userLoginMaxAttempts, CONFIG.userLoginWindowSec);
-    if (!allowed) return error('ძალიან ბევრი მცდელობა. სცადეთ 10 წუთში.', 429);
+    if (!allowed) {
+      await logSecurityEvent(env, request, 'login_rate_limited', 'user');
+      return error('ძალიან ბევრი მცდელობა. სცადეთ 10 წუთში.', 429);
+    }
     const user = await env.DB.prepare(
       'SELECT id, username, email, password_hash, email_verified, disabled, created_at ' +
       'FROM users WHERE username = ? OR email = ?',
     ).bind(login, login.toLowerCase()).first();
-    if (!user) return error('მომხმარებლის სახელი/მეილი ან პაროლი არასწორია.', 401);
+    if (!user) {
+      await logSecurityEvent(env, request, 'login_failed', 'user');
+      return error('მომხმარებლის სახელი/მეილი ან პაროლი არასწორია.', 401);
+    }
     if (user.disabled === 1) return error('ანგარიში გათიშულია.', 403);
     const okPass = await verifyPassword(password, user.password_hash);
-    if (!okPass) return error('მომხმარებლის სახელი/მეილი ან პაროლი არასწორია.', 401);
+    if (!okPass) {
+      await logSecurityEvent(env, request, 'login_failed', 'user');
+      return error('მომხმარებლის სახელი/მეილი ან პაროლი არასწორია.', 401);
+    }
     if (user.email_verified !== 1) {
       return json({ error: 'email_not_verified', email: user.email }, 403);
     }
@@ -3018,7 +3127,10 @@ async function handleApi(request, env, url) {
     if (!user) return error('კოდი არასწორია ან ვადა გავიდა.', 400);
     if (user.disabled === 1) return error('ანგარიში გათიშულია.', 403);
     const check = await verifyEmailCode(env, user.id, 'reset', code);
-    if (!check.ok) return error(check.reason, 400);
+    if (!check.ok) {
+      await logSecurityEvent(env, request, 'code_failed', 'reset');
+      return error(check.reason, 400);
+    }
     const passwordHash = await hashPassword(parsed.body.new_password);
     await env.DB.prepare(
       'UPDATE users SET password_hash = ?, email_verified = 1 WHERE id = ?',
@@ -4193,6 +4305,7 @@ async function handleApi(request, env, url) {
       const res = await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
       await env.DB.prepare('DELETE FROM visitor_users WHERE ip = ?').bind(ip).run();
       await env.DB.prepare('DELETE FROM visit_events WHERE ip = ?').bind(ip).run();
+      await env.DB.prepare('DELETE FROM security_events WHERE ip = ?').bind(ip).run();
       return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
     }
     // v10.5: manual cleanup by age — deletes everything older than N days
@@ -4207,14 +4320,16 @@ async function handleApi(request, env, url) {
       const r3 = await env.DB.prepare('DELETE FROM visit_events WHERE created_at < ?').bind(cutoff).run();
       const r4 = await env.DB.prepare('DELETE FROM visit_hours WHERE day < ?').bind(cutoffDay).run();
       const r5 = await env.DB.prepare('DELETE FROM path_stats WHERE last_seen < ?').bind(cutoff).run();
+      const r6 = await env.DB.prepare('DELETE FROM security_events WHERE created_at < ?').bind(cutoff).run();
       const changes = (r) => (r.meta ? r.meta.changes : 0);
-      return json({ ok: true, deleted: { visitors: changes(r1), visitorUsers: changes(r2), events: changes(r3), hours: changes(r4), paths: changes(r5) } });
+      return json({ ok: true, deleted: { visitors: changes(r1), visitorUsers: changes(r2), events: changes(r3), hours: changes(r4), paths: changes(r5), securityEvents: changes(r6) } });
     }
     const res = await env.DB.prepare('DELETE FROM visitors').run();
     await env.DB.prepare('DELETE FROM visitor_users').run();
     await env.DB.prepare('DELETE FROM visit_events').run();
     await env.DB.prepare('DELETE FROM visit_hours').run();
     await env.DB.prepare('DELETE FROM path_stats').run();
+    await env.DB.prepare('DELETE FROM security_events').run();
     return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
   }
 
@@ -4291,9 +4406,11 @@ async function handleApi(request, env, url) {
       'INSERT OR IGNORE INTO ip_exclusions (ip, created_at) VALUES (?, ?)',
     ).bind(ip, Date.now()).run();
     const added = res.meta ? res.meta.changes > 0 : false;
-    // Adding an exclusion also removes the IP from the visitors list.
+    // Adding an exclusion also removes the IP from the visitors list
+    // and from the security event log.
     await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
     await env.DB.prepare('DELETE FROM visitor_users WHERE ip = ?').bind(ip).run();
+    await env.DB.prepare('DELETE FROM security_events WHERE ip = ?').bind(ip).run();
     return json({ ok: true, added });
   }
   if (path === '/api/admin/ip-exclusions' && method === 'DELETE') {
@@ -4301,6 +4418,39 @@ async function handleApi(request, env, url) {
     const ip = (url.searchParams.get('ip') || '').trim();
     if (!ip) return error('IP მისამართი საჭიროა.', 400);
     const res = await env.DB.prepare('DELETE FROM ip_exclusions WHERE ip = ?').bind(ip).run();
+    return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
+  }
+
+  // --- v10.6: security event log (admin only) --------------------------
+  if (path === '/api/admin/security-events' && method === 'GET') {
+    await ensureV15Schema(env);
+    const cutoff = Date.now() - CONFIG.securityLogRetentionMs;
+    await env.DB.prepare('DELETE FROM security_events WHERE created_at < ?').bind(cutoff).run().catch(() => {});
+    const type = (url.searchParams.get('type') || '').trim();
+    const limitRaw = parseInt(url.searchParams.get('limit') || '100', 10);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 100;
+    let rows;
+    if (type && SECURITY_EVENT_TYPES.has(type)) {
+      rows = await env.DB.prepare(
+        'SELECT id, ip, type, detail, created_at FROM security_events WHERE type = ? ORDER BY id DESC LIMIT ?',
+      ).bind(type, limit).all();
+    } else {
+      rows = await env.DB.prepare(
+        'SELECT id, ip, type, detail, created_at FROM security_events ORDER BY id DESC LIMIT ?',
+      ).bind(limit).all();
+    }
+    const totalRow = await env.DB.prepare('SELECT COUNT(*) AS n FROM security_events').first();
+    return json({
+      events: (rows.results || []).map((r) => ({
+        id: r.id, ip: r.ip, type: r.type, detail: r.detail, createdAt: r.created_at,
+      })),
+      total: totalRow ? totalRow.n : 0,
+    });
+  }
+  if (path === '/api/admin/security-events' && method === 'DELETE') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    await ensureV15Schema(env);
+    const res = await env.DB.prepare('DELETE FROM security_events').run();
     return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
   }
 
@@ -4593,11 +4743,65 @@ async function handleApi(request, env, url) {
 /* Main router                                                         */
 /* ------------------------------------------------------------------ */
 
-export default {
-  async fetch(request, env, ctx) {
+// v10.6: every response carries the security headers (HSTS, nosniff,
+// framing + referrer policy, CSP). The CSP allows only what the site
+// actually loads: same-origin scripts/styles/images, the inline site-key
+// script, and the Turnstile widget (script + frame + connect). Bodies,
+// statuses and existing headers (incl. Set-Cookie) pass through untouched.
+const SECURITY_HEADERS = {
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Content-Security-Policy': [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "connect-src 'self' https://challenges.cloudflare.com",
+    'frame-src https://challenges.cloudflare.com',
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+  ].join('; '),
+};
+
+function withSecurityHeaders(res) {
+  const headers = new Headers(res.headers);
+  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+    headers.set(name, value);
+  }
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+// v10.6: true when the client reached the edge over plain http.
+// CF-Visitor is set by Cloudflare's edge (absent in local dev and tests,
+// so those keep working over http); the URL check covers production hosts
+// if the header is ever missing.
+function edgeSchemeIsHttp(request, url) {
+  const cfVisitor = request.headers.get('CF-Visitor');
+  if (cfVisitor) {
     try {
-      const url = new URL(request.url);
-      const path = url.pathname;
+      if (JSON.parse(cfVisitor).scheme === 'http') return true;
+    } catch { /* fall through to the URL check */ }
+  }
+  if (url.protocol !== 'http:') return false;
+  const host = url.hostname.toLowerCase();
+  return host === CONFIG.publicHost || host === CONFIG.adminHost || host.endsWith('.workers.dev');
+}
+
+async function fetchInner(request, env, ctx) {
+  try {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // v10.6: force HTTPS on production hosts.
+    if (edgeSchemeIsHttp(request, url)) {
+      const target = new URL(request.url);
+      target.protocol = 'https:';
+      return new Response(null, { status: 301, headers: { Location: target.toString() } });
+    }
 
       if (path === '/health') {
         return new Response('ok', { headers: { 'Content-Type': 'text/plain' } });
@@ -4652,5 +4856,10 @@ export default {
       console.error('fetch error:', e && e.message ? e.message : e);
       return json({ error: 'სერვერის შეცდომა.' }, 500);
     }
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    return withSecurityHeaders(await fetchInner(request, env, ctx));
   },
 };

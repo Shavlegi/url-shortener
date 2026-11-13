@@ -39,6 +39,7 @@
       <button id="tabbtn-users" class="btn tab-btn" type="button">👥 მომხმარებლები</button>
       <button id="tabbtn-qr" class="btn tab-btn" type="button">📱 QR კოდები</button>
       <button id="tabbtn-visitors" class="btn tab-btn" type="button">👁 სტუმრები</button>
+      <button id="tabbtn-security" class="btn tab-btn" type="button">🛡 უსაფრთხოება</button>
       <button id="tabbtn-chat" class="btn tab-btn" type="button">💬 ჩატები <span id="chat-unread-badge" class="badge unread" hidden>0</span></button>
       <button id="tabbtn-create" class="btn tab-btn" type="button">➕ ახალი ბმული</button>
       <button id="tabbtn-stats" class="btn tab-btn" type="button">📊 სტატისტიკა</button>
@@ -176,7 +177,7 @@
       <div id="visitors-list" class="links-list"></div>
       <p id="visitors-error" class="error" hidden></p>
       <h3>გამონაკლისი IP-ები</h3>
-      <p class="muted">ამ სიაში დამატებული IP-ებიდან ვიზიტები არ ჩაიწერება. დამატებისას IP სტუმრების სიიდანაც იშლება.</p>
+      <p class="muted">ამ სიაში დამატებული IP-ებიდან ვიზიტები არ ჩაიწერება. დამატებისას IP სტუმრების სიიდან და უსაფრთხოების ლოგიდანაც იშლება.</p>
       <label class="field">
         <span class="sr-only">IP მისამართი</span>
         <input id="exclusion-ip-input" type="text" autocomplete="off" placeholder="მაგ. 1.2.3.4" maxlength="45">
@@ -187,6 +188,31 @@
       <p id="exclusions-empty" class="muted" hidden>გამონაკლისები არ არის.</p>
       <div id="exclusions-list" class="links-list"></div>
       <p id="exclusions-error" class="error" hidden></p>
+    </section>
+
+    <section class="card" id="section-security" hidden>
+      <h2>უსაფრთხოება</h2>
+      <p class="muted">წარუმატებელი შესვლები, ლიმიტის გადაჭარბებები, Turnstile-ის ჩავარდნები, არასწორი კოდები და დაბლოკილი ბმულები — მხოლოდ ადმინს ჩანს. ჩანაწერები 90 დღის შემდეგ ავტომატურად იშლება; გამონაკლისში დამატებული IP-ები არ იწერება.</p>
+      <p class="link-meta" id="security-totals">—</p>
+      <div class="row">
+        <label class="field">
+          <span class="sr-only">ტიპის ფილტრი</span>
+          <select id="security-type-select">
+            <option value="">ყველა ტიპი</option>
+            <option value="login_failed">წარუმატებელი შესვლა</option>
+            <option value="login_rate_limited">ლიმიტი (შესვლა)</option>
+            <option value="turnstile_failed">Turnstile ჩავარდა</option>
+            <option value="code_failed">არასწორი კოდი</option>
+            <option value="blocked_url">დაბლოკილი ბმული</option>
+          </select>
+        </label>
+      </div>
+      <div class="result-actions">
+        <button id="security-clear-btn" class="btn danger-outline" type="button">ლოგის გასუფთავება</button>
+      </div>
+      <p id="security-empty" class="muted" hidden>ჩანაწერები ჯერ არ არის.</p>
+      <div id="security-list" class="links-list"></div>
+      <p id="security-error" class="error" hidden></p>
     </section>
 
     <section class="card" id="section-chat" hidden>
