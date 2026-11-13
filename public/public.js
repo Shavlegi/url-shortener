@@ -457,25 +457,99 @@ $('qr-bg-input').addEventListener('input', () => {
   renderMakerQr();
 });
 
-/* "მორგებული" button (v8.3): opens the native color picker for the QR color,
-   then for the background, one after the other. */
+/* Custom color picker modal (v8.4): the "მორგებული" button opens this
+   directly — Hue/Saturation/Value sliders like the phone picker's Custom
+   view. The native picker can't be forced into its Custom view, so the
+   site has its own. Draft until Set; Cancel discards. Sequential: QR
+   color first, then background. */
+function qrHexToHsv(hex) {
+  const c = hex.replace('#', '');
+  const r = parseInt(c.substr(0, 2), 16) / 255;
+  const g = parseInt(c.substr(2, 2), 16) / 255;
+  const b = parseInt(c.substr(4, 2), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  const s = max === 0 ? 0 : d / max;
+  return { h: Math.round(h), s: Math.round(s * 100), v: Math.round(max * 100) };
+}
+function qrHsvToHex(h, s, v) {
+  s /= 100; v /= 100;
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else { r = c; b = x; }
+  const toHex = (n) => Math.round((n + m) * 255).toString(16).padStart(2, '0');
+  return '#' + toHex(r) + toHex(g) + toHex(b);
+}
+let qrColorTarget = null; // 'qr-fg-input' | 'qr-bg-input'
+let qrColorChainBg = false;
+function qrColorModalRefresh() {
+  const h = Number($('qr-hue-slider').value);
+  const s = Number($('qr-sat-slider').value);
+  const v = Number($('qr-val-slider').value);
+  const hex = qrHsvToHex(h, s, v);
+  $('qr-chosen-swatch').style.background = hex;
+  $('qr-chosen-hex').textContent = hex.toUpperCase();
+  // Slider tracks follow the current hue/saturation/value.
+  $('qr-sat-slider').style.background =
+    'linear-gradient(90deg, ' + qrHsvToHex(h, 0, v) + ', ' + qrHsvToHex(h, 100, v) + ')';
+  $('qr-val-slider').style.background =
+    'linear-gradient(90deg, #000000, ' + qrHsvToHex(h, s, 100) + ')';
+}
+function qrColorModalOpen(targetId, title, chainBg) {
+  qrColorTarget = targetId;
+  qrColorChainBg = chainBg;
+  $('qr-color-modal-title').textContent = title;
+  const hsv = qrHexToHsv($(targetId).value || '#000000');
+  $('qr-hue-slider').value = hsv.h;
+  $('qr-sat-slider').value = hsv.s;
+  $('qr-val-slider').value = hsv.v;
+  qrColorModalRefresh();
+  $('qr-color-modal').hidden = false;
+}
+function qrColorModalClose() {
+  $('qr-color-modal').hidden = true;
+  qrColorTarget = null;
+  qrColorChainBg = false;
+}
+['qr-hue-slider', 'qr-sat-slider', 'qr-val-slider'].forEach((id) => {
+  $(id).addEventListener('input', qrColorModalRefresh);
+});
+$('qr-color-cancel').addEventListener('click', qrColorModalClose);
+$('qr-color-modal').addEventListener('click', (e) => {
+  if (e.target === $('qr-color-modal')) qrColorModalClose();
+});
+$('qr-color-set').addEventListener('click', () => {
+  const h = Number($('qr-hue-slider').value);
+  const s = Number($('qr-sat-slider').value);
+  const v = Number($('qr-val-slider').value);
+  const hex = qrHsvToHex(h, s, v);
+  const target = $(qrColorTarget);
+  target.value = hex;
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+  if (qrColorChainBg && qrColorTarget === 'qr-fg-input') {
+    qrColorModalOpen('qr-bg-input', 'ფონი', false);
+  } else {
+    qrColorModalClose();
+  }
+});
 $('qr-custom-btn').addEventListener('click', () => {
-  const fgInput = $('qr-fg-input');
-  const bgInput = $('qr-bg-input');
-  let chained = true;
-  const openBg = () => {
-    if (!chained) return;
-    chained = false;
-    bgInput.click();
-  };
-  fgInput.addEventListener('change', openBg, { once: true });
-  // If the first picker is cancelled (no change event), drop the chain so a
-  // later unrelated color change can't open the background picker.
-  setTimeout(() => {
-    chained = false;
-    fgInput.removeEventListener('change', openBg);
-  }, 120000);
-  fgInput.click();
+  qrColorModalOpen('qr-fg-input', 'QR ფერი', true);
 });
 
 $('qr-maker-download').addEventListener('click', () => {
