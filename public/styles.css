@@ -117,36 +117,60 @@ input:focus { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3p
 .hint.ok { color: var(--success); }
 .hint.bad { color: var(--danger); }
 
+/* Glow pill buttons (v8.8): dark glass capsule, gradient border + halo.
+   The gradient ring uses the padding-box / border-box layering trick;
+   text stays solid white so emoji labels keep rendering. */
 .btn {
   display: inline-block;
   padding: 11px 18px;
   font-size: 1rem;
   font-weight: 650;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.02)) padding-box,
+    linear-gradient(135deg, rgba(96, 165, 250, 0.55), rgba(168, 85, 247, 0.55) 55%, rgba(232, 121, 249, 0.45)) border-box;
+  background-color: rgba(20, 12, 40, 0.78);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
   color: var(--text);
   cursor: pointer;
   text-align: center;
   text-decoration: none;
-  transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 0 14px rgba(139, 92, 246, 0.22), 0 6px 18px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
 }
-.btn:hover { transform: translateY(-1px); border-color: var(--border-strong); background: rgba(255, 255, 255, 0.13); }
-.btn:active { transform: translateY(0) scale(0.98); }
+.btn:hover { transform: translateY(-1px); filter: brightness(1.12); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 0 22px rgba(139, 92, 246, 0.4), 0 8px 22px rgba(0, 0, 0, 0.4); }
+.btn:active { transform: translateY(0) scale(0.98); filter: brightness(0.96); }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .btn.primary {
-  background: linear-gradient(135deg, var(--primary-2), var(--primary) 130%);
-  border-color: rgba(216, 180, 254, 0.45);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03)) padding-box,
+    linear-gradient(135deg, #38bdf8, #a855f7 55%, #e879f9) border-box;
+  background-color: rgba(46, 20, 96, 0.82);
   color: var(--primary-text);
-  box-shadow: var(--glow);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 0 24px rgba(168, 85, 247, 0.5), 0 10px 26px rgba(124, 58, 237, 0.35);
 }
-.btn.primary:hover { filter: brightness(1.1); background: linear-gradient(135deg, var(--primary-2), var(--primary) 130%); }
-.btn.danger-outline { color: var(--danger); border-color: rgba(255, 107, 94, 0.55); background: transparent; }
-.btn.danger { background: linear-gradient(135deg, #e05346, #c0392b); border-color: rgba(255, 140, 130, 0.45); color: #fff; }
-.btn.small { padding: 7px 14px; font-size: 0.9rem; border-radius: 999px; }
-.btn:disabled { opacity: 0.55; cursor: default; transform: none; }
+.btn.primary:hover { filter: brightness(1.14); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.26), 0 0 32px rgba(168, 85, 247, 0.65), 0 12px 30px rgba(124, 58, 237, 0.45); }
+.btn.danger-outline {
+  color: var(--danger);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.01)) padding-box,
+    linear-gradient(135deg, rgba(248, 113, 113, 0.7), rgba(239, 68, 68, 0.7) 55%, rgba(249, 115, 22, 0.6)) border-box;
+  background-color: rgba(40, 12, 14, 0.6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 0 14px rgba(239, 68, 68, 0.25);
+}
+.btn.danger {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02)) padding-box,
+    linear-gradient(135deg, #f87171, #ef4444 55%, #f97316) border-box;
+  background-color: rgba(90, 20, 18, 0.85);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 0 20px rgba(239, 68, 68, 0.45), 0 8px 22px rgba(0, 0, 0, 0.35);
+}
+.btn.danger:hover, .btn.danger-outline:hover { filter: brightness(1.12); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 24px rgba(239, 68, 68, 0.45), 0 8px 22px rgba(0, 0, 0, 0.4); }
+.btn.small { padding: 7px 14px; font-size: 0.9rem; }
+.btn:disabled { opacity: 0.55; cursor: default; transform: none; filter: none; box-shadow: none; }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .file-btn { cursor: pointer; }
@@ -162,12 +186,14 @@ input:focus { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3p
   backdrop-filter: blur(16px) saturate(1.3);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 8px 24px rgba(0, 0, 0, 0.30);
 }
-.tab-btn, .period-btn { border-radius: 999px; border-color: transparent; background: transparent; }
+.tab-btn, .period-btn { background: transparent; border-color: transparent; box-shadow: none; }
 .tab-btn.active, .period-btn.active {
-  background: linear-gradient(135deg, var(--primary-2), var(--primary) 130%);
-  border-color: rgba(216, 180, 254, 0.45);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.03)) padding-box,
+    linear-gradient(135deg, #38bdf8, #a855f7 55%, #e879f9) border-box;
+  background-color: rgba(46, 20, 96, 0.82);
   color: var(--primary-text);
-  box-shadow: 0 6px 18px rgba(124, 58, 237, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 0 20px rgba(168, 85, 247, 0.5);
 }
 .period-tabs { margin: 12px 0; }
 .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
@@ -370,7 +396,8 @@ input:disabled { opacity: 0.55; }
    "მორგებული" opens the HSV sliders modal. The native color inputs live
    hidden and hold the values. */
 .qr-color-btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 440px; margin-bottom: 12px; }
-.qr-color-btn { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font: inherit; color: inherit; }
+.qr-color-btn { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px; border: 1px solid transparent; border-radius: var(--radius-sm); background: linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02)) padding-box, linear-gradient(135deg, rgba(96, 165, 250, 0.5), rgba(168, 85, 247, 0.5) 55%, rgba(232, 121, 249, 0.4)) border-box; background-color: rgba(20, 12, 40, 0.72); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 0 12px rgba(139, 92, 246, 0.2); cursor: pointer; font: inherit; color: inherit; transition: filter 0.15s ease, box-shadow 0.15s ease; }
+.qr-color-btn:hover { filter: brightness(1.1); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 18px rgba(139, 92, 246, 0.35); }
 .qr-color-btn-swatch { width: 40px; height: 40px; border-radius: 50%; border: 2px solid var(--border-strong); }
 .qr-color-btn-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; border: 2px solid var(--border-strong); border-radius: 50%; background: var(--surface-solid); }
 .qr-color-btn-label { font-size: 0.85rem; font-weight: 600; }
