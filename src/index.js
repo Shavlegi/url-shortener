@@ -1037,6 +1037,45 @@ async function ensureV11Schema(env) {
   }
 }
 
+let v12SchemaChecked = false;
+
+async function ensureV12Schema(env) {
+  if (v12SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v12_visitor_users'",
+    ).first();
+    if (flag && flag.value === '12') {
+      v12SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS visitor_users (' +
+      'ip TEXT NOT NULL, ' +
+      'user_id INTEGER NOT NULL REFERENCES users(id), ' +
+      'last_seen INTEGER NOT NULL, ' +
+      'PRIMARY KEY (ip, user_id))',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_visitor_users_user ON visitor_users (user_id, last_seen DESC)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v12_visitor_users', '12')",
+    ).run();
+    v12SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v12 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — the limiter itself   */
 /* never stores raw IPs; visitor IPs live only in the v10 visitors    */
@@ -2316,11 +2355,19 @@ async function recordVisit(env, request, path) {
     const cleanPath = String(path || '/').slice(0, 200);
     await ensureV10Schema(env);
     await ensureV11Schema(env);
+    await ensureV12Schema(env);
     // v10.1: admin-excluded IPs are never recorded.
     const excluded = await env.DB.prepare(
       'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
     ).bind(ip).first();
     if (excluded) return;
+    // v10.2: link the visit to the logged-in user, if any (anonymous
+    // visits simply have no mapping row).
+    let userId = null;
+    try {
+      const userSession = await getUserSession(env, request);
+      if (userSession) userId = userSession.userId;
+    } catch { /* treat as anonymous */ }
     await env.DB.batch([
       env.DB.prepare(
         'INSERT INTO visitors (ip, visits, first_seen, last_seen, last_path) VALUES (?, 1, ?, ?, ?) ' +
@@ -2329,6 +2376,13 @@ async function recordVisit(env, request, path) {
       env.DB.prepare(
         'DELETE FROM visitors WHERE last_seen < ?',
       ).bind(now - CONFIG.visitorRetentionMs),
+      env.DB.prepare(
+        'DELETE FROM visitor_users WHERE last_seen < ?',
+      ).bind(now - CONFIG.visitorRetentionMs),
+      ...(userId ? [env.DB.prepare(
+        'INSERT INTO visitor_users (ip, user_id, last_seen) VALUES (?, ?, ?) ' +
+        'ON CONFLICT(ip, user_id) DO UPDATE SET last_seen = excluded.last_seen',
+      ).bind(ip, userId, now)] : []),
     ]);
   } catch (e) {
     console.error('recordVisit failed:', e && e.message ? e.message : e);
@@ -2468,6 +2522,8 @@ async function handleApi(request, env, url) {
   await ensureV10Schema(env);
   // v10.1 schema (ip_exclusions) — same lazy pattern, see ensureV11Schema.
   await ensureV11Schema(env);
+  // v10.2 schema (visitor_users) — same lazy pattern, see ensureV12Schema.
+  await ensureV12Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -3739,6 +3795,9 @@ async function handleApi(request, env, url) {
     await env.DB.prepare(
       'DELETE FROM visitors WHERE last_seen < ?',
     ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
+    await env.DB.prepare(
+      'DELETE FROM visitor_users WHERE last_seen < ?',
+    ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
     let rows;
     if (q) {
       const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
@@ -3755,6 +3814,16 @@ async function handleApi(request, env, url) {
     const totals = await env.DB.prepare(
       'SELECT COUNT(*) AS c, COALESCE(SUM(visits), 0) AS s FROM visitors',
     ).first();
+    // v10.2: usernames seen from each IP (logged-in visits only).
+    const userRows = await env.DB.prepare(
+      'SELECT vu.ip, u.username, vu.last_seen FROM visitor_users vu ' +
+      'JOIN users u ON u.id = vu.user_id ORDER BY vu.last_seen DESC',
+    ).all();
+    const usersByIp = new Map();
+    for (const ur of (userRows.results || [])) {
+      if (!usersByIp.has(ur.ip)) usersByIp.set(ur.ip, []);
+      usersByIp.get(ur.ip).push({ username: ur.username, lastSeen: ur.last_seen });
+    }
     return json({
       visitors: (rows.results || []).map((r) => ({
         ip: r.ip,
@@ -3762,6 +3831,7 @@ async function handleApi(request, env, url) {
         firstSeen: r.first_seen,
         lastSeen: r.last_seen,
         lastPath: r.last_path,
+        users: usersByIp.get(r.ip) || [],
       })),
       totalDevices: totals ? totals.c : 0,
       totalVisits: totals ? totals.s : 0,
@@ -3773,9 +3843,11 @@ async function handleApi(request, env, url) {
     if (ip) {
       if (ip.length > 45) return error('არასწორი IP.', 400);
       const res = await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
+      await env.DB.prepare('DELETE FROM visitor_users WHERE ip = ?').bind(ip).run();
       return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
     }
     const res = await env.DB.prepare('DELETE FROM visitors').run();
+    await env.DB.prepare('DELETE FROM visitor_users').run();
     return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
   }
 
@@ -3800,6 +3872,7 @@ async function handleApi(request, env, url) {
     const added = res.meta ? res.meta.changes > 0 : false;
     // Adding an exclusion also removes the IP from the visitors list.
     await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
+    await env.DB.prepare('DELETE FROM visitor_users WHERE ip = ?').bind(ip).run();
     return json({ ok: true, added });
   }
   if (path === '/api/admin/ip-exclusions' && method === 'DELETE') {
@@ -3848,6 +3921,7 @@ async function handleApi(request, env, url) {
       ).bind(userId).run();
       await env.DB.prepare('DELETE FROM user_sessions WHERE user_id = ?').bind(userId).run();
       await env.DB.prepare('DELETE FROM email_codes WHERE user_id = ?').bind(userId).run();
+      await env.DB.prepare('DELETE FROM visitor_users WHERE user_id = ?').bind(userId).run();
       // v8.0: the user's profile + buttons go with the account. The
       // avatar R2 object is deleted best-effort — a leftover orphan
       // object is harmless (unguessable key, no references left).

@@ -866,6 +866,13 @@ function visitorCard(v) {
   meta.textContent = v.visits + ' ვიზიტი · პირველი: ' + fmtDate(v.firstSeen) + ' · ბოლო: ' + fmtDate(v.lastSeen);
   card.appendChild(meta);
 
+  if (v.users && v.users.length > 0) {
+    const usersEl = document.createElement('p');
+    usersEl.className = 'link-meta';
+    usersEl.textContent = '👤 ' + v.users.map((u) => u.username).join(' · ');
+    card.appendChild(usersEl);
+  }
+
   if (v.lastPath) {
     const pathEl = document.createElement('p');
     pathEl.className = 'link-meta';
