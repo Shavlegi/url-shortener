@@ -365,17 +365,13 @@ input:disabled { opacity: 0.55; }
    top of the page. Glass background so scrolled content stays readable
    underneath; z-index below modals (10) and toast (20). */
 .site-header { position: sticky; top: 0; z-index: 5; margin-top: 0; background: rgba(10, 10, 10, 0.6); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); border-bottom: 1px solid var(--border); }
-/* QR color buttons (v8.6): three compact buttons side by side. The QR color
-   and background buttons are native color inputs (the phone picker's
-   suggestions grid); only "მორგებული" opens the in-page HSV modal.
-   The .qr-color-btns input[type="color"] selector beats the generic
-   input[type="color"] width rule (0,2,1 vs 0,1,1). */
+/* QR color buttons (v8.7): three compact glass buttons side by side. The QR
+   color and background buttons open the prepared-colors modal; only
+   "მორგებული" opens the HSV sliders modal. The native color inputs live
+   hidden and hold the values. */
 .qr-color-btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 440px; margin-bottom: 12px; }
 .qr-color-btn { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font: inherit; color: inherit; }
-.qr-color-btns input[type="color"] { -webkit-appearance: none; appearance: none; width: 40px; height: 40px; border: 2px solid var(--border-strong); border-radius: 50%; padding: 0; background: none; cursor: pointer; }
-.qr-color-btns input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
-.qr-color-btns input[type="color"]::-webkit-color-swatch { border: none; border-radius: 50%; }
-.qr-color-btns input[type="color"]::-moz-color-swatch { border: none; border-radius: 50%; }
+.qr-color-btn-swatch { width: 40px; height: 40px; border-radius: 50%; border: 2px solid var(--border-strong); }
 .qr-color-btn-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; border: 2px solid var(--border-strong); border-radius: 50%; background: var(--surface-solid); }
 .qr-color-btn-label { font-size: 0.85rem; font-weight: 600; }
 /* Custom color picker modal (v8.4): Hue/Saturation/Value sliders. */
@@ -390,6 +386,10 @@ input:disabled { opacity: 0.55; }
 .qr-chosen-label { font-weight: 600; font-size: 0.9rem; }
 .qr-chosen-swatch { width: 44px; height: 44px; border-radius: 10px; border: 2px solid var(--border-strong); background: #000; margin-left: auto; }
 .qr-chosen-row .qr-hex { font-family: ui-monospace, monospace; font-size: 0.9rem; color: var(--muted); text-transform: uppercase; }
+/* Prepared colors modal (v8.7): 8 ready-color squares, glass modal. */
+.qr-preset-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.qr-preset-sq { aspect-ratio: 1; border-radius: 12px; border: 2px solid var(--border-strong); cursor: pointer; padding: 0; }
+.qr-preset-sq.selected { border-color: var(--primary-2); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--primary-2), var(--glow); }
 
 /* Motion: micro-interactions only; honor reduced-motion preferences. */
 @media (prefers-reduced-motion: reduce) {

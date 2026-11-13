@@ -548,12 +548,64 @@ $('qr-color-set').addEventListener('click', () => {
     qrColorModalClose();
   }
 });
-/* Only "მორგებული" opens the custom modal (sequential: QR color, then
-   background). The QR color / background buttons are native color inputs
-   and open the phone picker's suggestions grid. */
+/* Prepared colors modal (v8.7): the QR color / background buttons open this
+   glass modal with 8 ready colors only — no Custom link. Draft until Set. */
+let qrPresetTarget = null;
+let qrPresetSelected = '#000000';
+function qrPresetModalRefresh() {
+  document.querySelectorAll('.qr-preset-sq').forEach((btn) => {
+    btn.classList.toggle('selected', btn.dataset.color.toLowerCase() === qrPresetSelected.toLowerCase());
+  });
+  $('qr-preset-chosen-swatch').style.background = qrPresetSelected;
+  $('qr-preset-chosen-hex').textContent = qrPresetSelected.toUpperCase();
+}
+function qrPresetModalOpen(targetId, title) {
+  qrPresetTarget = targetId;
+  qrPresetSelected = $(targetId).value || '#000000';
+  $('qr-preset-modal-title').textContent = title;
+  qrPresetModalRefresh();
+  $('qr-preset-modal').hidden = false;
+}
+function qrPresetModalClose() {
+  $('qr-preset-modal').hidden = true;
+  qrPresetTarget = null;
+}
+document.querySelectorAll('.qr-preset-sq').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    qrPresetSelected = btn.dataset.color;
+    qrPresetModalRefresh();
+  });
+});
+$('qr-preset-cancel').addEventListener('click', qrPresetModalClose);
+$('qr-preset-modal').addEventListener('click', (e) => {
+  if (e.target === $('qr-preset-modal')) qrPresetModalClose();
+});
+$('qr-preset-set').addEventListener('click', () => {
+  const target = $(qrPresetTarget);
+  target.value = qrPresetSelected;
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+  qrPresetModalClose();
+});
+
+/* Button swatches mirror the current colors. */
+function syncQrBtnSwatches() {
+  const fgSwatch = $('qr-fg-swatch');
+  const bgSwatch = $('qr-bg-swatch');
+  if (fgSwatch) fgSwatch.style.background = $('qr-fg-input').value;
+  if (bgSwatch) bgSwatch.style.background = $('qr-bg-input').value;
+}
+$('qr-fg-input').addEventListener('input', syncQrBtnSwatches);
+$('qr-bg-input').addEventListener('input', syncQrBtnSwatches);
+$('qr-fg-btn').addEventListener('click', () => {
+  qrPresetModalOpen('qr-fg-input', 'QR ფერი');
+});
+$('qr-bg-btn').addEventListener('click', () => {
+  qrPresetModalOpen('qr-bg-input', 'ფონი');
+});
 $('qr-custom-btn').addEventListener('click', () => {
   qrColorModalOpen('qr-fg-input', 'QR ფერი', true);
 });
+syncQrBtnSwatches();
 
 $('qr-maker-download').addEventListener('click', () => {
   if (!makerCurrent) return;
@@ -612,6 +664,7 @@ function favCard(fav) {
     $('qr-label-input').value = fav.label;
     $('qr-fg-input').value = fav.fg || '#000000';
     $('qr-bg-input').value = fav.bg || '#ffffff';
+    syncQrBtnSwatches();
     renderMakerQr();
     $('qr-maker-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });

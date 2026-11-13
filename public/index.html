@@ -172,18 +172,22 @@
       <input id="qr-label-input" type="text" autocomplete="off" maxlength="100" placeholder="მაგ. კაფის Wi-Fi">
     </label>
     <div class="qr-color-btns">
-      <label class="qr-color-btn">
-        <input id="qr-fg-input" type="color" value="#000000">
+      <button type="button" class="qr-color-btn" id="qr-fg-btn">
+        <span class="qr-color-btn-swatch" id="qr-fg-swatch" style="background:#000000"></span>
         <span class="qr-color-btn-label">QR ფერი</span>
-      </label>
-      <label class="qr-color-btn">
-        <input id="qr-bg-input" type="color" value="#ffffff">
+      </button>
+      <button type="button" class="qr-color-btn" id="qr-bg-btn">
+        <span class="qr-color-btn-swatch" id="qr-bg-swatch" style="background:#ffffff"></span>
         <span class="qr-color-btn-label">ფონი</span>
-      </label>
+      </button>
       <button type="button" class="qr-color-btn" id="qr-custom-btn">
         <span class="qr-color-btn-icon">🎨</span>
         <span class="qr-color-btn-label">მორგებული</span>
       </button>
+    </div>
+    <div hidden>
+      <input id="qr-fg-input" type="color" value="#000000">
+      <input id="qr-bg-input" type="color" value="#ffffff">
     </div>
     <label class="field">
       <span>ლოგო <small>(არასავალდებულო — სურათი ცენტრში)</small></span>
@@ -396,6 +400,32 @@
       <p id="settings-error" class="error" hidden></p>
       <div class="result-actions">
         <button id="settings-close" class="btn">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Prepared colors picker (v8.7): 8 ready colors only, no Custom link. -->
+  <div id="qr-preset-modal" class="modal" hidden>
+    <div class="modal-box qr-color-modal-box">
+      <h3>🎨 <span id="qr-preset-modal-title">QR ფერი</span></h3>
+      <div class="qr-preset-grid" id="qr-preset-grid">
+        <button type="button" class="qr-preset-sq" data-color="#ff0000" style="background:#ff0000" aria-label="წითელი"></button>
+        <button type="button" class="qr-preset-sq" data-color="#00ffff" style="background:#00ffff" aria-label="ცისფერი"></button>
+        <button type="button" class="qr-preset-sq" data-color="#0000ff" style="background:#0000ff" aria-label="ლურჯი"></button>
+        <button type="button" class="qr-preset-sq" data-color="#00ff00" style="background:#00ff00" aria-label="მწვანე"></button>
+        <button type="button" class="qr-preset-sq" data-color="#ff00ff" style="background:#ff00ff" aria-label="ვარდისფერი"></button>
+        <button type="button" class="qr-preset-sq" data-color="#ffff00" style="background:#ffff00" aria-label="ყვითელი"></button>
+        <button type="button" class="qr-preset-sq" data-color="#000000" style="background:#000000" aria-label="შავი"></button>
+        <button type="button" class="qr-preset-sq" data-color="#ffffff" style="background:#ffffff" aria-label="თეთრი"></button>
+      </div>
+      <div class="qr-chosen-row">
+        <span class="qr-chosen-label">არჩეული ფერი</span>
+        <span class="qr-chosen-swatch" id="qr-preset-chosen-swatch"></span>
+        <span class="qr-hex" id="qr-preset-chosen-hex">#000000</span>
+      </div>
+      <div class="result-actions">
+        <button id="qr-preset-cancel" class="btn" type="button">გაუქმება</button>
+        <button id="qr-preset-set" class="btn primary" type="button">არჩევა</button>
       </div>
     </div>
   </div>
