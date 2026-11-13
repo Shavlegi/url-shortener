@@ -171,15 +171,31 @@
       <span>სახელი <small>(რჩეულებში შესანახად — ცარიელი = ავტომატური)</small></span>
       <input id="qr-label-input" type="text" autocomplete="off" maxlength="100" placeholder="მაგ. კაფის Wi-Fi">
     </label>
-    <div class="row">
-      <label class="field">
-        <span>QR ფერი</span>
+    <div class="qr-color-btns">
+      <label class="qr-color-btn">
         <input id="qr-fg-input" type="color" value="#000000">
+        <span class="qr-color-btn-label">QR ფერი</span>
       </label>
-      <label class="field">
-        <span>ფონი</span>
+      <label class="qr-color-btn">
         <input id="qr-bg-input" type="color" value="#ffffff">
+        <span class="qr-color-btn-label">ფონი</span>
       </label>
+      <button type="button" class="qr-color-btn" id="qr-custom-btn" aria-expanded="false" aria-controls="qr-custom-panel">
+        <span class="qr-color-btn-icon">🎨</span>
+        <span class="qr-color-btn-label">მორგებული</span>
+      </button>
+    </div>
+    <div class="qr-custom-panel" id="qr-custom-panel" hidden>
+      <div class="row">
+        <label class="field">
+          <span>QR ფერი</span>
+          <input id="qr-fg-custom" type="color" value="#000000">
+        </label>
+        <label class="field">
+          <span>ფონი</span>
+          <input id="qr-bg-custom" type="color" value="#ffffff">
+        </label>
+      </div>
     </div>
     <label class="field">
       <span>ლოგო <small>(არასავალდებულო — სურათი ცენტრში)</small></span>

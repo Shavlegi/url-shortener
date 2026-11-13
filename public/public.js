@@ -457,6 +457,36 @@ $('qr-bg-input').addEventListener('input', () => {
   renderMakerQr();
 });
 
+/* QR custom panel (v8.2): the "მორგებული" button opens a panel holding both
+   color pickers. Panel inputs mirror the main ones; edits flow through the
+   main inputs so the live re-render above stays the single path. */
+function syncQrCustomInputs() {
+  const cfg = $('qr-fg-custom');
+  const cbg = $('qr-bg-custom');
+  if (cfg) cfg.value = $('qr-fg-input').value;
+  if (cbg) cbg.value = $('qr-bg-input').value;
+}
+$('qr-fg-custom').addEventListener('input', (e) => {
+  $('qr-fg-input').value = e.target.value;
+  $('qr-fg-input').dispatchEvent(new Event('input', { bubbles: true }));
+});
+$('qr-bg-custom').addEventListener('input', (e) => {
+  $('qr-bg-input').value = e.target.value;
+  $('qr-bg-input').dispatchEvent(new Event('input', { bubbles: true }));
+});
+$('qr-fg-input').addEventListener('input', syncQrCustomInputs);
+$('qr-bg-input').addEventListener('input', syncQrCustomInputs);
+$('qr-custom-btn').addEventListener('click', () => {
+  const panel = $('qr-custom-panel');
+  const willOpen = panel.hidden;
+  panel.hidden = !willOpen;
+  const btn = $('qr-custom-btn');
+  btn.setAttribute('aria-expanded', String(willOpen));
+  btn.classList.toggle('active', willOpen);
+  if (willOpen) syncQrCustomInputs();
+});
+syncQrCustomInputs();
+
 $('qr-maker-download').addEventListener('click', () => {
   if (!makerCurrent) return;
   const canvas = $('qr-maker-canvas');
@@ -514,6 +544,7 @@ function favCard(fav) {
     $('qr-label-input').value = fav.label;
     $('qr-fg-input').value = fav.fg || '#000000';
     $('qr-bg-input').value = fav.bg || '#ffffff';
+    syncQrCustomInputs();
     renderMakerQr();
     $('qr-maker-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });

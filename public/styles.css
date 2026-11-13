@@ -365,12 +365,26 @@ input:disabled { opacity: 0.55; }
    top of the page. Glass background so scrolled content stays readable
    underneath; z-index below modals (10) and toast (20). */
 .site-header { position: sticky; top: 0; z-index: 5; margin-top: 0; background: rgba(10, 10, 10, 0.6); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); border-bottom: 1px solid var(--border); }
-/* QR color buttons: native color inputs restyled as glass buttons.
-   ID selectors win over the generic input[type="color"] width rule. */
-#qr-fg-input, #qr-bg-input { height: 48px; padding: 5px; border: 2px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); cursor: pointer; }
-#qr-fg-input::-webkit-color-swatch-wrapper, #qr-bg-input::-webkit-color-swatch-wrapper { padding: 0; }
-#qr-fg-input::-webkit-color-swatch, #qr-bg-input::-webkit-color-swatch { border: none; border-radius: 8px; }
-#qr-fg-input::-moz-color-swatch, #qr-bg-input::-moz-color-swatch { border: none; border-radius: 8px; }
+/* QR color buttons (v8.2): three compact buttons side by side; the
+   "მორგებული" button opens a panel holding both color pickers.
+   The .qr-color-btns input[type="color"] selector beats the generic
+   input[type="color"] width rule (0,2,1 vs 0,1,1). */
+.qr-color-btns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 440px; margin-bottom: 12px; }
+.qr-color-btn { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font: inherit; color: inherit; }
+.qr-color-btns input[type="color"] { -webkit-appearance: none; appearance: none; width: 40px; height: 40px; border: 2px solid var(--border-strong); border-radius: 50%; padding: 0; background: none; cursor: pointer; }
+.qr-color-btns input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.qr-color-btns input[type="color"]::-webkit-color-swatch { border: none; border-radius: 50%; }
+.qr-color-btns input[type="color"]::-moz-color-swatch { border: none; border-radius: 50%; }
+.qr-color-btn-icon { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; border: 2px solid var(--border-strong); border-radius: 50%; background: var(--surface-solid); }
+.qr-color-btn-label { font-size: 0.85rem; font-weight: 600; }
+.qr-color-btn.active { border-color: var(--primary-2); box-shadow: var(--glow); }
+.qr-custom-panel { max-width: 440px; margin-bottom: 12px; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.qr-custom-panel .row { grid-template-columns: 1fr 1fr; }
+.qr-custom-panel .field { margin-bottom: 0; }
+#qr-fg-custom, #qr-bg-custom { height: 48px; padding: 5px; border: 2px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface-solid); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); cursor: pointer; }
+#qr-fg-custom::-webkit-color-swatch-wrapper, #qr-bg-custom::-webkit-color-swatch-wrapper { padding: 0; }
+#qr-fg-custom::-webkit-color-swatch, #qr-bg-custom::-webkit-color-swatch { border: none; border-radius: 8px; }
+#qr-fg-custom::-moz-color-swatch, #qr-bg-custom::-moz-color-swatch { border: none; border-radius: 8px; }
 
 /* Motion: micro-interactions only; honor reduced-motion preferences. */
 @media (prefers-reduced-motion: reduce) {
