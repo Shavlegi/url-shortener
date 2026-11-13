@@ -38,6 +38,7 @@
       <button id="tabbtn-links" class="btn tab-btn active" type="button">🔗 ბმულები</button>
       <button id="tabbtn-users" class="btn tab-btn" type="button">👥 მომხმარებლები</button>
       <button id="tabbtn-qr" class="btn tab-btn" type="button">📱 QR კოდები</button>
+      <button id="tabbtn-visitors" class="btn tab-btn" type="button">👁 სტუმრები</button>
       <button id="tabbtn-chat" class="btn tab-btn" type="button">💬 ჩატები <span id="chat-unread-badge" class="badge unread" hidden>0</span></button>
       <button id="tabbtn-create" class="btn tab-btn" type="button">➕ ახალი ბმული</button>
       <button id="tabbtn-stats" class="btn tab-btn" type="button">📊 სტატისტიკა</button>
@@ -81,10 +82,21 @@
 
     <section class="card" id="section-links">
       <h2>ჩემი ბმულები</h2>
-      <label class="field">
-        <span class="sr-only">ძებნა</span>
-        <input id="search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან ბმული…">
-      </label>
+      <div class="row">
+        <label class="field">
+          <span class="sr-only">ძებნა</span>
+          <input id="search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან ბმული…">
+        </label>
+        <label class="field">
+          <span class="sr-only">დალაგება</span>
+          <select id="links-sort-select">
+            <option value="newest">უახლესი</option>
+            <option value="oldest">უძველესი</option>
+            <option value="clicks_desc">ყველაზე მეტი კლიკი</option>
+            <option value="clicks_asc">ყველაზე ნაკლები კლიკი</option>
+          </select>
+        </label>
+      </div>
       <p id="links-empty" class="muted" hidden>ბმულები ჯერ არ გაქვთ.</p>
       <div id="links-list" class="links-list"></div>
       <p id="links-error" class="error" hidden></p>
@@ -93,10 +105,19 @@
     <section class="card" id="section-users" hidden>
       <h2>მომხმარებლები</h2>
       <p class="muted">რეგისტრირებული მომხმარებლები. მომხმარებლის წაშლისას მისი ბმულები ანონიმური ხდება, მაგრამ მუშაობას აგრძელებს.</p>
-      <label class="field">
-        <span class="sr-only">მომხმარებლების ძებნა</span>
-        <input id="user-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან მეილი…">
-      </label>
+      <div class="row">
+        <label class="field">
+          <span class="sr-only">მომხმარებლების ძებნა</span>
+          <input id="user-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი ან მეილი…">
+        </label>
+        <label class="field">
+          <span class="sr-only">დალაგება</span>
+          <select id="users-sort-select">
+            <option value="newest">უახლესი</option>
+            <option value="oldest">უძველესი</option>
+          </select>
+        </label>
+      </div>
       <p id="user-filter-note" class="muted" hidden>ფილტრი: მხოლოდ აქტიური მომხმარებლები · <button id="user-filter-clear" class="btn small" type="button">გასუფთავება</button></p>
       <p id="users-empty" class="muted" hidden>მომხმარებლები ჯერ არ არიან.</p>
       <div id="users-list" class="links-list"></div>
@@ -106,13 +127,51 @@
     <section class="card" id="section-qr" hidden>
       <h2>QR კოდები</h2>
       <p class="muted">ყველა შექმნილი QR კოდი — როგორც ბმულები, მფლობელით. რჩეულად შენახულები ⭐ ნიშნით გამოირჩევა. ანონიმური QR-ები მფლობელის გარეშე ჩანს.</p>
-      <label class="field">
-        <span class="sr-only">ძებნა</span>
-        <input id="qr-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი, მფლობელი ან შიგთავსი…">
-      </label>
+      <div class="row">
+        <label class="field">
+          <span class="sr-only">ძებნა</span>
+          <input id="qr-search-input" type="search" autocomplete="off" placeholder="ძებნა — სახელი, მფლობელი ან შიგთავსი…">
+        </label>
+        <label class="field">
+          <span class="sr-only">დალაგება</span>
+          <select id="qr-sort-select">
+            <option value="newest">უახლესი</option>
+            <option value="oldest">უძველესი</option>
+          </select>
+        </label>
+      </div>
       <p id="qr-empty" class="muted" hidden>QR კოდები ჯერ არ არის.</p>
       <div id="qr-list" class="links-list"></div>
       <p id="qr-error" class="error" hidden></p>
+    </section>
+
+    <section class="card" id="section-visitors" hidden>
+      <h2>სტუმრები</h2>
+      <p class="muted">ვიზიტორების IP მისამართები — მხოლოდ ადმინს ჩანს. 30 დღეზე ძველი ჩანაწერები ავტომატურად იშლება; ღილაკით მთლიანი სიის გასუფთავებაც შეიძლება.</p>
+      <p class="link-meta" id="visitors-totals">—</p>
+      <div class="row">
+        <label class="field">
+          <span class="sr-only">IP ძებნა</span>
+          <input id="visitor-search-input" type="search" autocomplete="off" placeholder="ძებნა — IP…">
+        </label>
+        <label class="field">
+          <span class="sr-only">დალაგება</span>
+          <select id="visitor-sort-select">
+            <option value="last_desc">ბოლო ვიზიტი — ახალი</option>
+            <option value="last_asc">ბოლო ვიზიტი — ძველი</option>
+            <option value="visits_desc">ყველაზე მეტი ვიზიტი</option>
+            <option value="visits_asc">ყველაზე ნაკლები ვიზიტი</option>
+            <option value="first_desc">პირველი ვიზიტი — ახალი</option>
+            <option value="first_asc">პირველი ვიზიტი — ძველი</option>
+          </select>
+        </label>
+      </div>
+      <div class="result-actions">
+        <button id="visitors-clear-btn" class="btn danger-outline" type="button">სიის გასუფთავება</button>
+      </div>
+      <p id="visitors-empty" class="muted" hidden>სტუმრები ჯერ არ არიან.</p>
+      <div id="visitors-list" class="links-list"></div>
+      <p id="visitors-error" class="error" hidden></p>
     </section>
 
     <section class="card" id="section-chat" hidden>
@@ -155,6 +214,7 @@
         <div class="stat stat-link" id="stat-card-users" role="button" tabindex="0" title="მომხმარებლების ნახვა"><span class="stat-num" id="stat-users">0</span><span class="stat-label">მომხმარებელი</span></div>
         <div class="stat stat-link" id="stat-card-active" role="button" tabindex="0" title="აქტიური მომხმარებლების ნახვა"><span class="stat-num" id="stat-active-users">0</span><span class="stat-label">აქტიური მომხმარებელი</span></div>
         <div class="stat stat-link" id="stat-card-qr" role="button" tabindex="0" title="QR კოდების ნახვა"><span class="stat-num" id="stat-qr">0</span><span class="stat-label">QR კოდი</span></div>
+        <div class="stat stat-link" id="stat-card-visitors" role="button" tabindex="0" title="სტუმრების ნახვა"><span class="stat-num" id="stat-visitors">0</span><span class="stat-label">მოწყობილობა</span></div>
       </div>
       <h3>აქტივობა</h3>
       <div class="tabs period-tabs" role="group" aria-label="პერიოდი">

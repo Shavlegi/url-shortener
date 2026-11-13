@@ -60,6 +60,8 @@ const CONFIG = {
   apiMaxPerMin: 60,
   redirectMaxPerMin: 120,
   maxLinksList: 200,
+  maxVisitorsList: 1000,
+  visitorRetentionMs: 30 * 24 * 3600 * 1000, // v10.0: visitor IPs auto-delete after 30 days
   maxImportLinks: 500,
   // v2: user accounts (voluntary — anonymous shortening stays as-is).
   usernameMin: 3,
@@ -958,8 +960,53 @@ async function ensureV9Schema(env) {
   }
 }
 
+let v10SchemaChecked = false;
+
+async function ensureV10Schema(env) {
+  if (v10SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v10_visitors'",
+    ).first();
+    if (flag && flag.value === '10') {
+      v10SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS visitors (' +
+      'ip TEXT PRIMARY KEY, ' +
+      'visits INTEGER NOT NULL DEFAULT 0, ' +
+      'first_seen INTEGER NOT NULL, ' +
+      'last_seen INTEGER NOT NULL, ' +
+      "last_path TEXT NOT NULL DEFAULT '')",
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_visitors_last ON visitors (last_seen DESC)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_visitors_visits ON visitors (visits DESC)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v10_visitors', '10')",
+    ).run();
+    v10SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v10 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
-/* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
+/* Rate limiting (D1-backed, keyed by hashed IP — the limiter itself   */
+/* never stores raw IPs; visitor IPs live only in the v10 visitors    */
+/* table, served admin-only)                                          */
 /* ------------------------------------------------------------------ */
 
 async function ipHash(request, env) {
@@ -2205,6 +2252,47 @@ function isBot(userAgent) {
   return BOT_UA.some((frag) => ua.includes(frag));
 }
 
+/* v10.0: visitor IP log (admin-only, 30-day retention). The owner asked
+   for this explicitly (2026-11-13): every non-bot visit to a document
+   page, a profile page, or a short-link redirect upserts one row per IP
+   (visit count + first/last seen + last path). Raw IPs live ONLY in the
+   visitors table and are served ONLY to the admin session; no public
+   endpoint ever returns them. Rows older than
+   CONFIG.visitorRetentionMs are pruned on every recorded visit.
+   recordVisit never throws — a logging failure must never break the
+   visitor's response. */
+async function recordVisit(env, request, path) {
+  try {
+    if (isBot(request.headers.get('User-Agent'))) return;
+    const ip = request.headers.get('CF-Connecting-IP');
+    if (!ip || ip === 'unknown' || ip.length > 45) return;
+    const now = Date.now();
+    const cleanPath = String(path || '/').slice(0, 200);
+    await ensureV10Schema(env);
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO visitors (ip, visits, first_seen, last_seen, last_path) VALUES (?, 1, ?, ?, ?) ' +
+        'ON CONFLICT(ip) DO UPDATE SET visits = visits + 1, last_seen = excluded.last_seen, last_path = excluded.last_path',
+      ).bind(ip, now, now, cleanPath),
+      env.DB.prepare(
+        'DELETE FROM visitors WHERE last_seen < ?',
+      ).bind(now - CONFIG.visitorRetentionMs),
+    ]);
+  } catch (e) {
+    console.error('recordVisit failed:', e && e.message ? e.message : e);
+  }
+}
+
+function scheduleVisit(env, ctx, request, path) {
+  try {
+    const p = recordVisit(env, request, path);
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(p);
+    else p.catch(() => {});
+  } catch {
+    // Never break the response on a logging failure.
+  }
+}
+
 async function handleRedirect(request, env, alias) {
   const url = new URL(request.url);
   const now = Date.now();
@@ -2324,6 +2412,8 @@ async function handleApi(request, env, url) {
   // v8.0 schema (profiles, profile_links) — same lazy pattern, see
   // ensureV9Schema.
   await ensureV9Schema(env);
+  // v10.0 schema (visitors) — same lazy pattern, see ensureV10Schema.
+  await ensureV10Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -3277,6 +3367,8 @@ async function handleApi(request, env, url) {
   // v2: each row also carries its owner (username, or null = anonymous).
   if (path === '/api/links' && method === 'GET') {
     const search = (url.searchParams.get('search') || '').trim();
+    const linkSort = { newest: 'l.created_at DESC', oldest: 'l.created_at ASC', clicks_desc: 'l.clicks DESC, l.created_at DESC', clicks_asc: 'l.clicks ASC, l.created_at DESC' };
+    const linkOrder = linkSort[url.searchParams.get('sort')] || linkSort.newest;
     let rows;
     if (search) {
       const like = '%' + search.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
@@ -3284,13 +3376,13 @@ async function handleApi(request, env, url) {
         'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, u.username AS owner ' +
         'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
         'WHERE l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' OR l.note LIKE ? ESCAPE \'\\\' ' +
-        'ORDER BY l.created_at DESC LIMIT ?',
+        'ORDER BY ' + linkOrder + ' LIMIT ?',
       ).bind(like, like, like, CONFIG.maxLinksList).all();
     } else {
       rows = await env.DB.prepare(
         'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, u.username AS owner ' +
         'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
-        'ORDER BY l.created_at DESC LIMIT ?',
+        'ORDER BY ' + linkOrder + ' LIMIT ?',
       ).bind(CONFIG.maxLinksList).all();
     }
     return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
@@ -3576,6 +3668,61 @@ async function handleApi(request, env, url) {
         profileViewCount: r.profile_view_count || 0,
       })),
     });
+  }
+
+  // --- v10.0: visitor IPs (admin only; never exposed publicly) ---------
+  if (path === '/api/admin/visitors' && method === 'GET') {
+    const visitorSort = {
+      last_desc: 'last_seen DESC',
+      last_asc: 'last_seen ASC',
+      visits_desc: 'visits DESC, last_seen DESC',
+      visits_asc: 'visits ASC, last_seen DESC',
+      first_desc: 'first_seen DESC',
+      first_asc: 'first_seen ASC',
+    };
+    const orderBy = visitorSort[url.searchParams.get('sort')] || visitorSort.last_desc;
+    const q = (url.searchParams.get('q') || '').trim();
+    await env.DB.prepare(
+      'DELETE FROM visitors WHERE last_seen < ?',
+    ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
+    let rows;
+    if (q) {
+      const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
+      rows = await env.DB.prepare(
+        'SELECT ip, visits, first_seen, last_seen, last_path FROM visitors ' +
+        'WHERE ip LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
+      ).bind(like, CONFIG.maxVisitorsList).all();
+    } else {
+      rows = await env.DB.prepare(
+        'SELECT ip, visits, first_seen, last_seen, last_path FROM visitors ' +
+        'ORDER BY ' + orderBy + ' LIMIT ?',
+      ).bind(CONFIG.maxVisitorsList).all();
+    }
+    const totals = await env.DB.prepare(
+      'SELECT COUNT(*) AS c, COALESCE(SUM(visits), 0) AS s FROM visitors',
+    ).first();
+    return json({
+      visitors: (rows.results || []).map((r) => ({
+        ip: r.ip,
+        visits: r.visits,
+        firstSeen: r.first_seen,
+        lastSeen: r.last_seen,
+        lastPath: r.last_path,
+      })),
+      totalDevices: totals ? totals.c : 0,
+      totalVisits: totals ? totals.s : 0,
+    });
+  }
+  if (path === '/api/admin/visitors' && method === 'DELETE') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const ip = (url.searchParams.get('ip') || '').trim();
+    if (ip) {
+      if (ip.length > 45) return error('არასწორი IP.', 400);
+      const res = await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
+      return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
+    }
+    const res = await env.DB.prepare('DELETE FROM visitors').run();
+    return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
   }
 
   // --- Admin: disable/enable or delete one user --------------------------
@@ -3878,6 +4025,10 @@ export default {
 
       // Static frontend files.
       if (path === '/' || STATIC_TYPES[path]) {
+        // v10.0: count document loads only (page views, not assets).
+        if (path === '/' || path === '/index.html' || path === '/admin.html') {
+          scheduleVisit(env, ctx, request, path);
+        }
         const res = await serveStatic(env, request, path);
         if (res) return res;
         return new Response('Not found', { status: 404 });
@@ -3899,6 +4050,7 @@ export default {
       if (request.method === 'GET' && profileMatch) {
         const allowed = await checkRateLimit(request, env, 'profile-view', CONFIG.redirectMaxPerMin, 60);
         if (!allowed) return new Response('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', { status: 429 });
+        scheduleVisit(env, ctx, request, path);
         return await handleProfilePage(request, env, profileMatch[1]);
       }
 
@@ -3910,6 +4062,7 @@ export default {
         }
         const allowed = await checkRateLimit(request, env, 'redirect', CONFIG.redirectMaxPerMin, 60);
         if (!allowed) return new Response('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', { status: 429 });
+        scheduleVisit(env, ctx, request, path);
         return await handleRedirect(request, env, alias);
       }
 

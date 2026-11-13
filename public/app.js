@@ -92,7 +92,7 @@ function setAuthed(yes) {
   loginView.hidden = yes;
   appView.hidden = !yes;
   if (yes) {
-    loadLinks(); loadUsers(); loadQrFavoritesAdmin();
+    loadLinks(); loadUsers(); loadQrFavoritesAdmin(); loadVisitors();
     if (currentTab === 'chat') { loadChatUsers(); startChatPolling(); }
   } else {
     stopChatPolling();
@@ -138,7 +138,7 @@ $('revoke-btn').addEventListener('click', async () => {
 
 /* ---------------- Tabs (admin menu) ---------------- */
 
-const TABS = ['links', 'users', 'qr', 'chat', 'create', 'stats', 'settings'];
+const TABS = ['links', 'users', 'qr', 'visitors', 'chat', 'create', 'stats', 'settings'];
 let currentTab = 'links';
 let activityPeriod = 'today';
 
@@ -154,6 +154,7 @@ function showTab(name) {
     loadRecentClicks();
   }
   if (name === 'qr') loadQrFavoritesAdmin();
+  if (name === 'visitors') loadVisitors();
   if (name === 'chat') {
     // Only load when logged in (appView starts hidden; setAuthed(true)
     // starts the chat load when the chat tab is already selected).
@@ -184,8 +185,13 @@ async function loadLinks() {
   const err = $('links-error');
   hideError(err);
   const q = $('search-input').value.trim();
+  const sort = $('links-sort-select').value;
+  const params = new URLSearchParams();
+  if (q) params.set('search', q);
+  if (sort && sort !== 'newest') params.set('sort', sort);
+  const qs = params.toString();
   try {
-    const data = await api('/api/links' + (q ? ('?search=' + encodeURIComponent(q)) : ''));
+    const data = await api('/api/links' + (qs ? ('?' + qs) : ''));
     links = data.links || [];
     renderLinks();
   } catch (e) {
@@ -374,6 +380,7 @@ $('search-input').addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(loadLinks, 350);
 });
+$('links-sort-select').addEventListener('change', loadLinks);
 
 /* ---------------- QR favorites (v5, admin view) ---------------- */
 // The admin sees every logged-in user's saved QR codes, like links:
@@ -414,10 +421,18 @@ function filteredQrFavs() {
     (QR_TYPE_NAMES[f.type] || f.type || '').toLowerCase().includes(q));
 }
 
+function sortedQrFavs(list) {
+  const sort = $('qr-sort-select').value;
+  const arr = [...list];
+  if (sort === 'oldest') arr.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  else arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return arr;
+}
+
 function renderQrFavorites() {
   const list = $('qr-list');
   list.innerHTML = '';
-  const shown = filteredQrFavs();
+  const shown = sortedQrFavs(filteredQrFavs());
   const q = ($('qr-search-input').value || '').trim();
   $('qr-empty').hidden = shown.length !== 0;
   $('qr-empty').textContent = q ? 'QR კოდი ვერ მოიძებნა.' : 'QR კოდები ჯერ არ არის.';
@@ -531,6 +546,7 @@ function qrFavCard(fav) {
 
 // Live search: every keystroke filters the already-loaded favorites.
 $('qr-search-input').addEventListener('input', renderQrFavorites);
+$('qr-sort-select').addEventListener('change', renderQrFavorites);
 
 /* ---------------- Users (v2) ---------------- */
 
@@ -561,10 +577,18 @@ function filteredUsers() {
     (u.email || '').toLowerCase().includes(q));
 }
 
+function sortedUsers(list) {
+  const sort = $('users-sort-select').value;
+  const arr = [...list];
+  if (sort === 'oldest') arr.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  else arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return arr;
+}
+
 function renderUsers() {
   const list = $('users-list');
   list.innerHTML = '';
-  const shown = filteredUsers();
+  const shown = sortedUsers(filteredUsers());
   const q = ($('user-search-input').value || '').trim();
   $('user-filter-note').hidden = userFilter !== 'active';
   $('users-empty').hidden = shown.length !== 0;
@@ -585,6 +609,7 @@ $('user-filter-clear').addEventListener('click', () => {
 // Live search: every keystroke filters the already-loaded users
 // (username or email, case-insensitive substring) — no Enter, no reload.
 $('user-search-input').addEventListener('input', renderUsers);
+$('users-sort-select').addEventListener('change', renderUsers);
 
 function userCard(user) {
   const card = document.createElement('div');
@@ -783,6 +808,103 @@ $('profile-limit-save-btn').addEventListener('click', async () => {
 $('profile-close').addEventListener('click', () => { $('profile-modal').hidden = true; });
 $('profile-modal').addEventListener('click', (e) => {
   if (e.target === $('profile-modal')) $('profile-modal').hidden = true;
+});
+
+/* ---------------- Visitors (v10.0) ---------------- */
+// Visitor IPs — admin only. Search + sort run server-side
+// (see GET /api/admin/visitors). List loads on login and when the tab opens.
+let visitors = [];
+let visitorTotals = { totalDevices: 0, totalVisits: 0 };
+
+async function loadVisitors() {
+  const err = $('visitors-error');
+  hideError(err);
+  const q = $('visitor-search-input').value.trim();
+  const sort = $('visitor-sort-select').value;
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (sort) params.set('sort', sort);
+  const qs = params.toString();
+  try {
+    const data = await api('/api/admin/visitors' + (qs ? ('?' + qs) : ''));
+    visitors = data.visitors || [];
+    visitorTotals = { totalDevices: data.totalDevices || 0, totalVisits: data.totalVisits || 0 };
+    renderVisitors();
+  } catch (e) {
+    showError(err, e.message || 'სტუმრების ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function renderVisitors() {
+  const list = $('visitors-list');
+  list.innerHTML = '';
+  $('visitors-totals').textContent = 'სულ ' + visitorTotals.totalDevices + ' მოწყობილობა · ' + visitorTotals.totalVisits + ' ვიზიტი';
+  const statEl = $('stat-visitors');
+  if (statEl) statEl.textContent = String(visitorTotals.totalDevices);
+  const q = ($('visitor-search-input').value || '').trim();
+  $('visitors-empty').hidden = visitors.length !== 0;
+  $('visitors-empty').textContent = q ? 'IP ვერ მოიძებნა.' : 'სტუმრები ჯერ არ არიან.';
+  for (const v of visitors) {
+    list.appendChild(visitorCard(v));
+  }
+}
+
+function visitorCard(v) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const ip = document.createElement('span');
+  ip.className = 'link-alias';
+  ip.textContent = v.ip;
+  top.appendChild(ip);
+  card.appendChild(top);
+
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = v.visits + ' ვიზიტი · პირველი: ' + fmtDate(v.firstSeen) + ' · ბოლო: ' + fmtDate(v.lastSeen);
+  card.appendChild(meta);
+
+  if (v.lastPath) {
+    const pathEl = document.createElement('p');
+    pathEl.className = 'link-meta';
+    pathEl.textContent = 'ბოლო გვერდი: ' + v.lastPath;
+    card.appendChild(pathEl);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'result-actions';
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn small danger-outline';
+  delBtn.type = 'button';
+  delBtn.textContent = 'წაშლა';
+  delBtn.addEventListener('click', async () => {
+    if (!window.confirm('ნამდვილად წავშალო IP „' + v.ip + '"?')) return;
+    try {
+      await api('/api/admin/visitors?ip=' + encodeURIComponent(v.ip), { method: 'DELETE' });
+      toast('IP წაიშალა');
+      loadVisitors();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(delBtn);
+  card.appendChild(actions);
+  return card;
+}
+
+let visitorSearchTimer = null;
+$('visitor-search-input').addEventListener('input', () => {
+  clearTimeout(visitorSearchTimer);
+  visitorSearchTimer = setTimeout(loadVisitors, 350);
+});
+$('visitor-sort-select').addEventListener('change', loadVisitors);
+$('visitors-clear-btn').addEventListener('click', async () => {
+  if (!window.confirm('ნამდვილად გაასუფთავო სტუმრების მთლიანი სია? ეს მოქმედება უკან ვერ დაბრუნდება.')) return;
+  try {
+    const data = await api('/api/admin/visitors', { method: 'DELETE' });
+    toast('გასუფთავდა: ' + (data.deleted || 0) + ' ჩანაწერი');
+    loadVisitors();
+  } catch (e) { toast(e.message || 'შეცდომა'); }
 });
 
 /* ---------------- Stats + activity ---------------- */
@@ -992,6 +1114,8 @@ function openStatCard(target) {
     renderUsers();
   } else if (target === 'qr') {
     showTab('qr');
+  } else if (target === 'visitors') {
+    showTab('visitors');
   }
 }
 
@@ -1001,6 +1125,7 @@ const STAT_CARDS = {
   'stat-card-users': 'users',
   'stat-card-active': 'active',
   'stat-card-qr': 'qr',
+  'stat-card-visitors': 'visitors',
 };
 for (const [id, target] of Object.entries(STAT_CARDS)) {
   const card = $(id);
