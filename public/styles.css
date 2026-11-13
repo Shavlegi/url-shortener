@@ -432,3 +432,5 @@ input:disabled { opacity: 0.55; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+
+/* v8.9 trigger: glow pill everywhere — deployed after the 2026-11-13 git relink. */
