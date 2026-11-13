@@ -171,6 +171,16 @@ input:focus { outline: none; border-color: var(--accent-2); box-shadow: 0 0 0 3p
 .btn.danger:hover, .btn.danger-outline:hover { filter: brightness(1.12); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 0 24px rgba(239, 68, 68, 0.45), 0 8px 22px rgba(0, 0, 0, 0.4); }
 .btn.small { padding: 7px 14px; font-size: 0.9rem; }
 .btn:disabled { opacity: 0.55; cursor: default; transform: none; filter: none; box-shadow: none; }
+/* File inputs (v8.9): the native "Choose file" button gets the glow pill
+   treatment via ::file-selector-button (Chrome/Brave/Safari/Firefox). */
+input[type="file"]::file-selector-button {
+  font: inherit; font-size: 0.9rem; font-weight: 650; color: var(--text);
+  padding: 7px 14px; margin-right: 10px;
+  border: 1px solid transparent; border-radius: 999px; cursor: pointer;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.02)) padding-box, linear-gradient(135deg, rgba(96, 165, 250, 0.55), rgba(168, 85, 247, 0.55) 55%, rgba(232, 121, 249, 0.45)) border-box;
+  background-color: rgba(20, 12, 40, 0.78);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 0 14px rgba(139, 92, 246, 0.22);
+}
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
 .file-btn { cursor: pointer; }
@@ -415,8 +425,8 @@ input:disabled { opacity: 0.55; }
 .qr-chosen-row .qr-hex { font-family: ui-monospace, monospace; font-size: 0.9rem; color: var(--muted); text-transform: uppercase; }
 /* Prepared colors modal (v8.7): 8 ready-color squares, glass modal. */
 .qr-preset-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-.qr-preset-sq { aspect-ratio: 1; border-radius: 12px; border: 2px solid var(--border-strong); cursor: pointer; padding: 0; }
-.qr-preset-sq.selected { border-color: var(--primary-2); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--primary-2), var(--glow); }
+.qr-preset-sq { aspect-ratio: 1; border-radius: 50%; border: 1px solid transparent; background: var(--sq) padding-box, linear-gradient(135deg, rgba(96, 165, 250, 0.55), rgba(168, 85, 247, 0.55) 55%, rgba(232, 121, 249, 0.45)) border-box; background-color: var(--sq); box-shadow: 0 0 10px rgba(139, 92, 246, 0.25); cursor: pointer; padding: 0; }
+.qr-preset-sq.selected { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--primary-2), 0 0 20px rgba(168, 85, 247, 0.6); }
 
 /* Motion: micro-interactions only; honor reduced-motion preferences. */
 @media (prefers-reduced-motion: reduce) {
