@@ -848,3 +848,20 @@ function onScanFound(value) {
     actions.appendChild(openBtn);
   }
 }
+
+/* v10.3: screen-size beacon (aggregate only, no identifiers). Fires
+   once per main-page load; failures are silently ignored. */
+(function sendScreenBeacon() {
+  try {
+    const w = window.screen && window.screen.width;
+    const h = window.screen && window.screen.height;
+    if (!w || !h) return;
+    fetch('/api/visit-beacon', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ w: Math.round(w), h: Math.round(h) }),
+      keepalive: true,
+      credentials: 'same-origin',
+    }).catch(() => {});
+  } catch { /* ignore */ }
+})();

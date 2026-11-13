@@ -152,7 +152,7 @@
       <div class="row">
         <label class="field">
           <span class="sr-only">IP ძებნა</span>
-          <input id="visitor-search-input" type="search" autocomplete="off" placeholder="ძებნა — IP…">
+          <input id="visitor-search-input" type="search" autocomplete="off" placeholder="ძებნა — IP, ქალაქი, პროვაიდერი…">
         </label>
         <label class="field">
           <span class="sr-only">დალაგება</span>
@@ -266,6 +266,24 @@
         <p id="recent-clicks-empty" class="muted" hidden>გახსნები ჯერ არ არის.</p>
         <div id="recent-clicks-list" class="links-list"></div>
       </div>
+      <h3>აქტივობა საათების მიხედვით</h3>
+      <div class="tabs period-tabs" role="group" aria-label="პერიოდი">
+        <button id="hours-today" class="btn small period-btn active" type="button">დღეს</button>
+        <button id="hours-7d" class="btn small period-btn" type="button">7 დღე</button>
+        <button id="hours-30d" class="btn small period-btn" type="button">30 დღე</button>
+      </div>
+      <p id="hours-empty" class="muted" hidden>ამ პერიოდში ვიზიტები არ ყოფილა.</p>
+      <div id="hours-list" class="links-list"></div>
+      <p id="hours-error" class="error" hidden></p>
+      <h3>პოპულარული გვერდები</h3>
+      <p id="path-stats-empty" class="muted" hidden>გვერდების სტატისტიკა ჯერ არ არის.</p>
+      <div id="path-stats-list" class="links-list"></div>
+      <p id="path-stats-error" class="error" hidden></p>
+      <h3>ეკრანის ზომები</h3>
+      <p class="muted">მთავარი გვერდის ვიზიტორები.</p>
+      <p id="screen-stats-empty" class="muted" hidden>ეკრანის მონაცემები ჯერ არ არის.</p>
+      <div id="screen-stats-list" class="links-list"></div>
+      <p id="screen-stats-error" class="error" hidden></p>
     </section>
 
     <section class="card" id="section-settings" hidden>

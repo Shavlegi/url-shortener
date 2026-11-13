@@ -62,6 +62,8 @@ const CONFIG = {
   maxLinksList: 200,
   maxVisitorsList: 1000,
   visitorRetentionMs: 30 * 24 * 3600 * 1000, // v10.0: visitor IPs auto-delete after 30 days
+  beaconMaxPerMin: 30, // v10.3: screen-size beacon, per IP
+  beaconMaxPerHour: 300, // v10.3: screen-size beacon, per IP
   maxImportLinks: 500,
   // v2: user accounts (voluntary — anonymous shortening stays as-is).
   usernameMin: 3,
@@ -1073,6 +1075,73 @@ async function ensureV12Schema(env) {
   } catch (e) {
     // Flag stays unset — the next request retries the migration.
     console.error('v12 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
+// ALTER TABLE ... ADD COLUMN for the v10.3 enrichment: on a database
+// where migrations already ran, the column exists — "duplicate column"
+// is expected and ignored; any other error aborts the migration.
+async function addColumnIfMissing(env, sql) {
+  try {
+    await env.DB.prepare(sql).run();
+  } catch (e) {
+    if (!/duplicate column/i.test(e && e.message ? e.message : '')) throw e;
+  }
+}
+
+let v13SchemaChecked = false;
+
+async function ensureV13Schema(env) {
+  if (v13SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v13_visit_enrichment'",
+    ).first();
+    if (flag && flag.value === '13') {
+      v13SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    const cols = [
+      'country TEXT', 'city TEXT', 'region TEXT', 'postal_code TEXT',
+      'latitude REAL', 'longitude REAL', 'timezone TEXT', 'isp TEXT',
+      'asn INTEGER', 'is_eu INTEGER', 'browser TEXT', 'os TEXT',
+      'device TEXT', 'language TEXT', 'referrer TEXT',
+    ];
+    for (const col of cols) {
+      await addColumnIfMissing(env, 'ALTER TABLE visitors ADD COLUMN ' + col);
+    }
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS visit_hours (' +
+      'day TEXT NOT NULL, ' +
+      'hour INTEGER NOT NULL, ' +
+      'visits INTEGER NOT NULL DEFAULT 0, ' +
+      'PRIMARY KEY (day, hour))',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS path_stats (' +
+      'path TEXT PRIMARY KEY, ' +
+      'visits INTEGER NOT NULL DEFAULT 0, ' +
+      'last_seen INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS screen_stats (' +
+      'resolution TEXT PRIMARY KEY, ' +
+      'visits INTEGER NOT NULL DEFAULT 0)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v13_visit_enrichment', '13')",
+    ).run();
+    v13SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v13 schema migration failed:', e && e.message ? e.message : e);
   }
 }
 
@@ -2337,6 +2406,73 @@ function isValidIp(ip) {
   return /^[0-9A-Fa-f:]+$/.test(ip) && ip.includes(':') && !ip.includes(':::');
 }
 
+// v10.3: parse a User-Agent into browser/OS/device. Only the parsed
+// values are stored — the raw User-Agent string never is.
+function parseUserAgent(ua) {
+  const s = ua || '';
+  let browser = null;
+  let m;
+  if ((m = s.match(/Edg\/(\d+)/))) browser = 'Edge ' + m[1];
+  else if ((m = s.match(/OPR\/(\d+)/))) browser = 'Opera ' + m[1];
+  else if ((m = s.match(/SamsungBrowser\/(\d+)/))) browser = 'Samsung ' + m[1];
+  else if ((m = s.match(/FxiOS\/(\d+)/))) browser = 'Firefox ' + m[1];
+  else if ((m = s.match(/CriOS\/(\d+)/))) browser = 'Chrome ' + m[1];
+  else if ((m = s.match(/Firefox\/(\d+)/))) browser = 'Firefox ' + m[1];
+  else if ((m = s.match(/Chrome\/(\d+)/))) browser = 'Chrome ' + m[1];
+  else if ((m = s.match(/Version\/(\d+).*Safari\//))) browser = 'Safari ' + m[1];
+  else if (/MSIE|Trident\//.test(s)) browser = 'Internet Explorer';
+  let os = null;
+  if ((m = s.match(/Android (\d+(?:\.\d+)?)/))) os = 'Android ' + m[1];
+  else if (/Android/.test(s)) os = 'Android';
+  else if ((m = s.match(/OS (\d+)[_.](\d+)/)) && /(iPhone|iPad|iPod)/.test(s)) os = 'iOS ' + m[1] + '.' + m[2];
+  else if (/(iPhone|iPad|iPod)/.test(s)) os = 'iOS';
+  else if (/Windows NT 10\.0/.test(s)) os = 'Windows 10/11';
+  else if (/Windows NT 6\.3/.test(s)) os = 'Windows 8.1';
+  else if (/Windows NT 6\.1/.test(s)) os = 'Windows 7';
+  else if (/Windows/.test(s)) os = 'Windows';
+  else if (/CrOS/.test(s)) os = 'ChromeOS';
+  else if ((m = s.match(/Mac OS X (\d+)[_.](\d+)/))) os = 'macOS ' + m[1] + '.' + m[2];
+  else if (/Mac OS X/.test(s)) os = 'macOS';
+  else if (/Linux/.test(s)) os = 'Linux';
+  let device = null;
+  if (/iPad/.test(s) || /Tablet/.test(s) || (/Android/.test(s) && !/Mobile/.test(s))) device = 'tablet';
+  else if (/Mobile|iPhone|iPod|Android/.test(s)) device = 'mobile';
+  else if (s) device = 'desktop';
+  return { browser, os, device };
+}
+
+// Georgia is UTC+4 year-round (no DST since 2004), so a fixed offset
+// gives Tbilisi-local day/hour for the visit-hours histogram.
+function tbilisiDayHour(now) {
+  const shifted = now + 4 * 3600 * 1000;
+  const day = new Date(shifted).toISOString().slice(0, 10);
+  const hour = new Date(shifted).getUTCHours();
+  const cutoffDay = new Date(shifted - 30 * 86400000).toISOString().slice(0, 10);
+  return { day, hour, cutoffDay };
+}
+
+// Referrer origin only (scheme + host) — the full URL can carry
+// sensitive query params from the referring page, and the origin is
+// what answers "where did the traffic come from".
+function referrerOrigin(request) {
+  const ref = request.headers.get('Referer');
+  if (!ref) return null;
+  try {
+    const u = new URL(ref);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.origin.slice(0, 200);
+  } catch {
+    return null;
+  }
+}
+
+function primaryLanguage(request) {
+  const al = request.headers.get('Accept-Language');
+  if (!al) return null;
+  const tag = al.split(',')[0].split(';')[0].trim();
+  return tag ? tag.slice(0, 10) : null;
+}
+
 /* v10.0: visitor IP log (admin-only, 30-day retention). The owner asked
    for this explicitly (2026-11-13): every non-bot visit to a document
    page, a profile page, or a short-link redirect upserts one row per IP
@@ -2348,7 +2484,8 @@ function isValidIp(ip) {
    visitor's response. */
 async function recordVisit(env, request, path) {
   try {
-    if (isBot(request.headers.get('User-Agent'))) return;
+    const ua = request.headers.get('User-Agent');
+    if (isBot(ua)) return;
     const ip = request.headers.get('CF-Connecting-IP');
     if (!ip || ip === 'unknown' || ip.length > 45) return;
     const now = Date.now();
@@ -2356,6 +2493,7 @@ async function recordVisit(env, request, path) {
     await ensureV10Schema(env);
     await ensureV11Schema(env);
     await ensureV12Schema(env);
+    await ensureV13Schema(env);
     // v10.1: admin-excluded IPs are never recorded.
     const excluded = await env.DB.prepare(
       'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
@@ -2368,11 +2506,43 @@ async function recordVisit(env, request, path) {
       const userSession = await getUserSession(env, request);
       if (userSession) userId = userSession.userId;
     } catch { /* treat as anonymous */ }
+    // v10.3: edge enrichment (Cloudflare request.cf — free, no third
+    // party) + parsed device info + language + referrer origin. Raw
+    // User-Agent is never stored, only the parsed browser/OS/device.
+    // COALESCE keeps the last KNOWN value when a field is missing.
+    const cf = request.cf || {};
+    const parsed = parseUserAgent(ua);
+    const country = (typeof cf.country === 'string' && cf.country) || request.headers.get('CF-IPCountry') || null;
+    const e = {
+      country: country ? String(country).slice(0, 2) : null,
+      city: typeof cf.city === 'string' && cf.city ? cf.city.slice(0, 100) : null,
+      region: typeof cf.region === 'string' && cf.region ? cf.region.slice(0, 100) : null,
+      postalCode: typeof cf.postalCode === 'string' && cf.postalCode ? cf.postalCode.slice(0, 20) : null,
+      latitude: typeof cf.latitude === 'number' ? cf.latitude : null,
+      longitude: typeof cf.longitude === 'number' ? cf.longitude : null,
+      timezone: typeof cf.timezone === 'string' && cf.timezone ? cf.timezone.slice(0, 50) : null,
+      isp: typeof cf.asOrganization === 'string' && cf.asOrganization ? cf.asOrganization.slice(0, 100) : null,
+      asn: typeof cf.asn === 'number' ? cf.asn : null,
+      isEu: typeof cf.isEUCountry === 'boolean' ? (cf.isEUCountry ? 1 : 0) : null,
+      browser: parsed.browser,
+      os: parsed.os,
+      device: parsed.device,
+      language: primaryLanguage(request),
+      referrer: referrerOrigin(request),
+    };
+    const { day, hour, cutoffDay } = tbilisiDayHour(now);
     await env.DB.batch([
       env.DB.prepare(
-        'INSERT INTO visitors (ip, visits, first_seen, last_seen, last_path) VALUES (?, 1, ?, ?, ?) ' +
-        'ON CONFLICT(ip) DO UPDATE SET visits = visits + 1, last_seen = excluded.last_seen, last_path = excluded.last_path',
-      ).bind(ip, now, now, cleanPath),
+        'INSERT INTO visitors (ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer) ' +
+        'VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(ip) DO UPDATE SET visits = visits + 1, last_seen = excluded.last_seen, last_path = excluded.last_path, ' +
+        'country = COALESCE(excluded.country, country), city = COALESCE(excluded.city, city), region = COALESCE(excluded.region, region), ' +
+        'postal_code = COALESCE(excluded.postal_code, postal_code), latitude = COALESCE(excluded.latitude, latitude), ' +
+        'longitude = COALESCE(excluded.longitude, longitude), timezone = COALESCE(excluded.timezone, timezone), isp = COALESCE(excluded.isp, isp), ' +
+        'asn = COALESCE(excluded.asn, asn), is_eu = COALESCE(excluded.is_eu, is_eu), browser = COALESCE(excluded.browser, browser), ' +
+        'os = COALESCE(excluded.os, os), device = COALESCE(excluded.device, device), language = COALESCE(excluded.language, language), ' +
+        'referrer = COALESCE(excluded.referrer, referrer)',
+      ).bind(ip, now, now, cleanPath, e.country, e.city, e.region, e.postalCode, e.latitude, e.longitude, e.timezone, e.isp, e.asn, e.isEu, e.browser, e.os, e.device, e.language, e.referrer),
       env.DB.prepare(
         'DELETE FROM visitors WHERE last_seen < ?',
       ).bind(now - CONFIG.visitorRetentionMs),
@@ -2383,6 +2553,20 @@ async function recordVisit(env, request, path) {
         'INSERT INTO visitor_users (ip, user_id, last_seen) VALUES (?, ?, ?) ' +
         'ON CONFLICT(ip, user_id) DO UPDATE SET last_seen = excluded.last_seen',
       ).bind(ip, userId, now)] : []),
+      env.DB.prepare(
+        'INSERT INTO visit_hours (day, hour, visits) VALUES (?, ?, 1) ' +
+        'ON CONFLICT(day, hour) DO UPDATE SET visits = visits + 1',
+      ).bind(day, hour),
+      env.DB.prepare(
+        'DELETE FROM visit_hours WHERE day < ?',
+      ).bind(cutoffDay),
+      env.DB.prepare(
+        'INSERT INTO path_stats (path, visits, last_seen) VALUES (?, 1, ?) ' +
+        'ON CONFLICT(path) DO UPDATE SET visits = visits + 1, last_seen = excluded.last_seen',
+      ).bind(cleanPath, now),
+      env.DB.prepare(
+        'DELETE FROM path_stats WHERE last_seen < ?',
+      ).bind(now - CONFIG.visitorRetentionMs),
     ]);
   } catch (e) {
     console.error('recordVisit failed:', e && e.message ? e.message : e);
@@ -2524,6 +2708,8 @@ async function handleApi(request, env, url) {
   await ensureV11Schema(env);
   // v10.2 schema (visitor_users) — same lazy pattern, see ensureV12Schema.
   await ensureV12Schema(env);
+  // v10.3 schema (visitors enrichment + visit_hours/path_stats/screen_stats) — same lazy pattern, see ensureV13Schema.
+  await ensureV13Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -2914,6 +3100,27 @@ async function handleApi(request, env, url) {
   // The client ignores failures — the QR still renders. Privacy note:
   // unlike v5, the generated QR content IS sent to the server now; no IP
   // is stored (rate limiting uses only the daily IP hash).
+  // --- v10.3: screen-size beacon (public, aggregate only) --------------
+  // Fired once per main-page load from public.js. Stores ONLY the
+  // resolution histogram — no IP, no identifier of any kind.
+  if (path === '/api/visit-beacon' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const allowedMin = await checkRateLimit(request, env, 'beacon', CONFIG.beaconMaxPerMin, 60);
+    const allowedHour = allowedMin && await checkRateLimit(request, env, 'beacon-hour', CONFIG.beaconMaxPerHour, 3600);
+    if (!allowedHour) return error('ძალიან ბევრი მოთხოვნა. სცადეთ მოგვიანებით.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const w = parsed.body.w;
+    const h = parsed.body.h;
+    if (!Number.isInteger(w) || !Number.isInteger(h) || w < 100 || w > 10000 || h < 100 || h > 10000) {
+      return error('არასწორი ეკრანის ზომა.', 400);
+    }
+    await env.DB.prepare(
+      'INSERT INTO screen_stats (resolution, visits) VALUES (?, 1) ' +
+      'ON CONFLICT(resolution) DO UPDATE SET visits = visits + 1',
+    ).bind(w + 'x' + h).run();
+    return json({ ok: true });
+  }
   if (path === '/api/qr-log' && method === 'POST') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const allowedMin = await checkRateLimit(request, env, 'qr-log', 20, 60);
@@ -3802,12 +4009,12 @@ async function handleApi(request, env, url) {
     if (q) {
       const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
       rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path FROM visitors ' +
-        'WHERE ip LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
-      ).bind(like, CONFIG.maxVisitorsList).all();
+        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer FROM visitors ' +
+        'WHERE ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\' OR language LIKE ? ESCAPE \'\\\' OR referrer LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
+      ).bind(like, like, like, like, like, like, like, like, like, like, CONFIG.maxVisitorsList).all();
     } else {
       rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path FROM visitors ' +
+        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer FROM visitors ' +
         'ORDER BY ' + orderBy + ' LIMIT ?',
       ).bind(CONFIG.maxVisitorsList).all();
     }
@@ -3831,6 +4038,21 @@ async function handleApi(request, env, url) {
         firstSeen: r.first_seen,
         lastSeen: r.last_seen,
         lastPath: r.last_path,
+        country: r.country || null,
+        city: r.city || null,
+        region: r.region || null,
+        postalCode: r.postal_code || null,
+        latitude: r.latitude === null || r.latitude === undefined ? null : r.latitude,
+        longitude: r.longitude === null || r.longitude === undefined ? null : r.longitude,
+        timezone: r.timezone || null,
+        isp: r.isp || null,
+        asn: r.asn === null || r.asn === undefined ? null : r.asn,
+        isEu: r.is_eu === 1,
+        browser: r.browser || null,
+        os: r.os || null,
+        device: r.device || null,
+        language: r.language || null,
+        referrer: r.referrer || null,
         users: usersByIp.get(r.ip) || [],
       })),
       totalDevices: totals ? totals.c : 0,
@@ -3849,6 +4071,36 @@ async function handleApi(request, env, url) {
     const res = await env.DB.prepare('DELETE FROM visitors').run();
     await env.DB.prepare('DELETE FROM visitor_users').run();
     return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
+  }
+
+  // --- v10.3: visit-hours histogram (admin only) -----------------------
+  if (path === '/api/admin/visit-hours' && method === 'GET') {
+    const period = url.searchParams.get('period') || 'today';
+    const { day, cutoffDay } = tbilisiDayHour(Date.now());
+    await env.DB.prepare('DELETE FROM visit_hours WHERE day < ?').bind(cutoffDay).run();
+    let fromDay = day;
+    if (period === '7d') fromDay = tbilisiDayHour(Date.now() - 6 * 86400000).day;
+    else if (period === '30d') fromDay = cutoffDay;
+    const rows = await env.DB.prepare(
+      'SELECT hour, SUM(visits) AS v FROM visit_hours WHERE day >= ? GROUP BY hour ORDER BY hour ASC',
+    ).bind(fromDay).all();
+    const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, visits: 0 }));
+    for (const r of (rows.results || [])) hours[r.hour].visits = r.v;
+    return json({ hours, period: period === '7d' || period === '30d' ? period : 'today' });
+  }
+  // --- v10.3: popular pages (admin only) -------------------------------
+  if (path === '/api/admin/path-stats' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT path, visits, last_seen FROM path_stats ORDER BY visits DESC, last_seen DESC LIMIT 100',
+    ).all();
+    return json({ pages: (rows.results || []).map((r) => ({ path: r.path, visits: r.visits, lastSeen: r.last_seen })) });
+  }
+  // --- v10.3: screen sizes (admin only) --------------------------------
+  if (path === '/api/admin/screen-stats' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT resolution, visits FROM screen_stats ORDER BY visits DESC LIMIT 50',
+    ).all();
+    return json({ screens: (rows.results || []).map((r) => ({ resolution: r.resolution, visits: r.visits })) });
   }
 
   // --- v10.1: excluded IPs (admin only) --------------------------------

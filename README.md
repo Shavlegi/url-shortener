@@ -17,8 +17,9 @@ Mini Link — უფასო, თვით-ჰოსტინგის ბმ�
 დაამოკლა, და მართავს მომხმარებლებს (გათიშვა/წაშლა).
 
 > **English summary:** Mini Link — a free, self-hosted URL shortener on Cloudflare Workers + D1,
-> with a Georgian UI, QR codes and click stats. Visitor IPs are logged admin-only
-> with 30-day retention (v10.0); no cookie tracking.
+> with a Georgian UI, QR codes and click stats. Visitor IPs and visit details
+> (country/city/ISP, device, language, referrer) are logged admin-only
+> with 30-day retention (v10.0/v10.3); no cookie tracking.
 > The public site (minilink.space) lets anyone shorten a link; the admin panel
 > (admin.minilink.space) is separate and password-protected. Admin login uses
 > PBKDF2-SHA256 + server-side sessions. v2 adds voluntary user accounts with
@@ -56,7 +57,13 @@ Mini Link — უფასო, თვით-ჰოსტინგის ბმ�
   გამონაკლისი IP-ები (v10.1): ადმინი ამატებს IP-ებს, რომელთა ვიზიტებიც
   არ იწერება; დამატებისას IP სტუმრების სიიდანაც იშლება; ყოველ IP-ზე
   კოპირების ღილაკია; შესული მომხმარებლის სახელი IP-ს გვერდით ჩანს
-  (v10.2, მხოლოდ ადმინში)
+  (v10.2, მხოლოდ ადმინში); ვიზიტის დეტალები (v10.3, მხოლოდ ადმინში):
+  ქვეყანა/ქალაქი/პროვაიდერი (Cloudflare-ის უფასო მონაცემებით, მესამე
+  მხარის გარეშე), ბრაუზერი/ოპერაციული სისტემა/მოწყობილობა (მხოლოდ
+  დამუშავებული მნიშვნელობები — ნედლი User-Agent არ ინახება), ენა და
+  საიდან მოვიდა (მხოლოდ წყაროს მისამართი); აგრეგატები: აქტივობა
+  საათების მიხედვით (თბილისის დრო), პოპულარული გვერდები, ეკრანის
+  ზომები (მთავარი გვერდის ანონიმური საზომი, IP-ის გარეშე)
 - **გაზიარება:** თითოეულ ბმულზე WhatsApp / Telegram / Facebook
   ღილაკები + ტელეფონის საკუთარი „გაზიარება" (share sheet)
 - **QR შემქმნელი (v5):** საჯარო გვერდზე ცალკე სექცია — QR კოდი

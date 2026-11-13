@@ -152,6 +152,9 @@ function showTab(name) {
   if (name === 'stats') {
     renderStats();
     loadRecentClicks();
+    loadVisitHours();
+    loadPathStats();
+    loadScreenStats();
   }
   if (name === 'qr') loadQrFavoritesAdmin();
   if (name === 'visitors') { loadVisitors(); loadExclusions(); }
@@ -873,6 +876,45 @@ function visitorCard(v) {
     card.appendChild(usersEl);
   }
 
+  const geoParts = [];
+  if (v.country) geoParts.push(v.country === 'T1' ? '🧅 Tor' : v.country);
+  if (v.city) geoParts.push(v.city);
+  if (v.region && v.region !== v.city) geoParts.push(v.region);
+  if (v.postalCode) geoParts.push(v.postalCode);
+  if (v.latitude !== null && v.latitude !== undefined && v.longitude !== null && v.longitude !== undefined) {
+    geoParts.push(Number(v.latitude).toFixed(2) + ', ' + Number(v.longitude).toFixed(2));
+  }
+  if (v.timezone) geoParts.push(v.timezone);
+  if (v.isp) geoParts.push(v.isp + (v.asn !== null && v.asn !== undefined ? ' (AS' + v.asn + ')' : ''));
+  if (v.isEu) geoParts.push('EU');
+  if (geoParts.length > 0) {
+    const geoEl = document.createElement('p');
+    geoEl.className = 'link-meta';
+    geoEl.textContent = '🌍 ' + geoParts.join(' · ');
+    card.appendChild(geoEl);
+  }
+
+  const devParts = [];
+  if (v.os) devParts.push(v.os);
+  if (v.browser) devParts.push(v.browser);
+  if (v.device) devParts.push(v.device === 'mobile' ? 'მობილური' : v.device === 'tablet' ? 'პლანშეტი' : 'კომპიუტერი');
+  if (devParts.length > 0) {
+    const devEl = document.createElement('p');
+    devEl.className = 'link-meta';
+    devEl.textContent = '📱 ' + devParts.join(' · ');
+    card.appendChild(devEl);
+  }
+
+  const miscParts = [];
+  if (v.language) miscParts.push('🔤 ' + v.language);
+  if (v.referrer) miscParts.push('🔗 ' + v.referrer);
+  if (miscParts.length > 0) {
+    const miscEl = document.createElement('p');
+    miscEl.className = 'link-meta';
+    miscEl.textContent = miscParts.join(' · ');
+    card.appendChild(miscEl);
+  }
+
   if (v.lastPath) {
     const pathEl = document.createElement('p');
     pathEl.className = 'link-meta';
@@ -1317,6 +1359,116 @@ function dateInputValue(d) {
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return y + '-' + m + '-' + day;
+}
+
+/* ---------------- Visit stats (v10.3): hours / pages / screens -------- */
+let hoursPeriod = 'today';
+
+async function loadVisitHours() {
+  const err = $('hours-error');
+  hideError(err);
+  try {
+    const data = await api('/api/admin/visit-hours?period=' + hoursPeriod);
+    renderVisitHours(data.hours || []);
+  } catch (e) {
+    showError(err, e.message || 'საათების სტატისტიკა ვერ ჩაიტვირთა.');
+  }
+}
+
+function renderVisitHours(hours) {
+  const list = $('hours-list');
+  list.innerHTML = '';
+  const total = hours.reduce((sum, h) => sum + (h.visits || 0), 0);
+  $('hours-empty').hidden = total !== 0;
+  const max = Math.max(1, ...hours.map((h) => h.visits || 0));
+  for (const h of hours) {
+    const row = document.createElement('div');
+    row.className = 'link-card';
+    const label = document.createElement('span');
+    label.className = 'link-alias';
+    label.textContent = String(h.hour).padStart(2, '0') + ':00';
+    const barWrap = document.createElement('div');
+    barWrap.style.cssText = 'height:10px;border-radius:999px;background:rgba(255,255,255,.08);margin:6px 0;overflow:hidden;';
+    const bar = document.createElement('div');
+    bar.style.cssText = 'height:100%;width:' + Math.round(((h.visits || 0) / max) * 100) + '%;background:linear-gradient(90deg,#7c3aed,#a855f7);border-radius:999px;';
+    barWrap.appendChild(bar);
+    const meta = document.createElement('p');
+    meta.className = 'link-meta';
+    meta.textContent = (h.visits || 0) + ' ვიზიტი';
+    row.appendChild(label);
+    row.appendChild(barWrap);
+    row.appendChild(meta);
+    list.appendChild(row);
+  }
+}
+
+const HOURS_BTNS = { 'hours-today': 'today', 'hours-7d': '7d', 'hours-30d': '30d' };
+for (const [id, period] of Object.entries(HOURS_BTNS)) {
+  $(id).addEventListener('click', () => {
+    hoursPeriod = period;
+    for (const [bid, p] of Object.entries(HOURS_BTNS)) $(bid).classList.toggle('active', p === period);
+    loadVisitHours();
+  });
+}
+
+async function loadPathStats() {
+  const err = $('path-stats-error');
+  hideError(err);
+  try {
+    const data = await api('/api/admin/path-stats');
+    const list = $('path-stats-list');
+    list.innerHTML = '';
+    const pages = data.pages || [];
+    $('path-stats-empty').hidden = pages.length !== 0;
+    for (const pg of pages) {
+      const card = document.createElement('div');
+      card.className = 'link-card';
+      const top = document.createElement('div');
+      top.className = 'link-top';
+      const name = document.createElement('span');
+      name.className = 'link-alias';
+      name.textContent = pg.path;
+      top.appendChild(name);
+      card.appendChild(top);
+      const meta = document.createElement('p');
+      meta.className = 'link-meta';
+      meta.textContent = pg.visits + ' ვიზიტი · ბოლო: ' + fmtDate(pg.lastSeen);
+      card.appendChild(meta);
+      list.appendChild(card);
+    }
+  } catch (e) {
+    showError(err, e.message || 'გვერდების სტატისტიკა ვერ ჩაიტვირთა.');
+  }
+}
+
+async function loadScreenStats() {
+  const err = $('screen-stats-error');
+  hideError(err);
+  try {
+    const data = await api('/api/admin/screen-stats');
+    const list = $('screen-stats-list');
+    list.innerHTML = '';
+    const screens = data.screens || [];
+    $('screen-stats-empty').hidden = screens.length !== 0;
+    for (const sc of screens) {
+      const card = document.createElement('div');
+      card.className = 'link-card';
+      const top = document.createElement('div');
+      top.className = 'link-top';
+      const name = document.createElement('span');
+      name.className = 'link-alias';
+      name.textContent = sc.resolution;
+      top.appendChild(name);
+      card.appendChild(top);
+      const meta = document.createElement('p');
+      meta.className = 'link-meta';
+      meta.textContent = sc.visits + ' ვიზიტი';
+      card.appendChild(meta);
+      list.appendChild(card);
+    }
+  } catch (e) {
+    showError(err, e.message || 'ეკრანის სტატისტიკა ვერ ჩაიტვირთა.');
+  }
 }
 
 /* ---------------- Create link ---------------- */
