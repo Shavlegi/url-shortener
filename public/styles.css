@@ -360,6 +360,11 @@ input:disabled { opacity: 0.55; }
 .footer { text-align: center; margin: 26px 0 8px; }
 .settings-user { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 10px; }
 .auth-bar:has(#auth-logged-out[hidden]) { display: none; }
+/* Sticky header (public site only): the menu/title/profile bar stays
+   pinned to the top while scrolling, and returns to its place at the
+   top of the page. Glass background so scrolled content stays readable
+   underneath; z-index below modals (10) and toast (20). */
+.site-header { position: sticky; top: 0; z-index: 5; margin-top: 0; background: rgba(10, 10, 10, 0.6); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); border-bottom: 1px solid var(--border); }
 
 /* Motion: micro-interactions only; honor reduced-motion preferences. */
 @media (prefers-reduced-motion: reduce) {
