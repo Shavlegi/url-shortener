@@ -89,6 +89,15 @@ const CONFIG = {
   chatUserMaxPerHour: 100, // messages per hour, per user id
   chatAdminMaxPerMin: 30, // admin messages per minute
   chatMaxMessages: 100, // messages returned per fetch
+  // v8.0: public profile pages (/@username). Avatars live in the same
+  // private R2 bucket as chat files (env.CHAT_FILES), under avatars/.
+  profileMaxDisplayName: 50, // display name cap, chars
+  profileMaxBio: 160, // bio cap, chars
+  profileMaxTitle: 60, // profile link button title cap, chars
+  profileDefaultLinkLimit: 5, // profile buttons per user, unless the admin raises it
+  profileMaxLinkLimit: 100, // admin-set link limit cap
+  profileAvatarMaxBytes: 2 * 1024 * 1024, // 2 MB decoded
+  profileWriteMaxPerMin: 30, // profile mutations per minute, per user id
   mailFrom: 'Mini Link <noreply@minilink.space>',
 };
 
@@ -882,6 +891,70 @@ async function ensureV8Schema(env) {
   } catch (e) {
     // Flag stays unset — the next request retries the migration.
     console.error('v8 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
+/* ---------------- Lazy v9 schema migration ---------------- */
+
+// Same idempotent pattern as v7 (see ensureV7Schema): applies
+// migrations/0009_profiles.sql on first use. Adds the profile-pages
+// tables: `profiles` (one row per user, created explicitly by the
+// user) and `profile_links` (the user's manually curated buttons).
+// Timestamps are ISO strings (TEXT) — profile dates are never
+// displayed, only stored; older tables use epoch-ms INTEGERs.
+let v9SchemaChecked = false;
+
+async function ensureV9Schema(env) {
+  if (v9SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v9_profiles'",
+    ).first();
+    if (flag && flag.value === '9') {
+      v9SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS profiles (' +
+      'user_id INTEGER PRIMARY KEY REFERENCES users(id), ' +
+      "display_name TEXT NOT NULL DEFAULT '', " +
+      "bio TEXT NOT NULL DEFAULT '', " +
+      'avatar_r2_key TEXT, ' +
+      'avatar_mime TEXT, ' +
+      'show_views INTEGER NOT NULL DEFAULT 1, ' +
+      'link_limit INTEGER NOT NULL DEFAULT 5, ' +
+      'view_count INTEGER NOT NULL DEFAULT 0, ' +
+      'created_at TEXT, ' +
+      'updated_at TEXT)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS profile_links (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'user_id INTEGER NOT NULL REFERENCES users(id), ' +
+      'position INTEGER NOT NULL DEFAULT 0, ' +
+      'kind TEXT NOT NULL, ' +
+      'link_id INTEGER REFERENCES links(id), ' +
+      "title TEXT NOT NULL DEFAULT '', " +
+      "url TEXT NOT NULL DEFAULT '', " +
+      'created_at TEXT)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_profile_links_user ON profile_links (user_id, position)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v9_profiles', '9')",
+    ).run();
+    v9SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v9 schema migration failed:', e && e.message ? e.message : e);
   }
 }
 
@@ -1730,6 +1803,340 @@ async function insertChatMessage(env, thread, sender, body, attachment) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Profile pages (v8.0) — public Linktree-style pages at /@username    */
+/*                                                                     */
+/* A profile is created EXPLICITLY by a logged-in, email-verified      */
+/* user (the gate is enforced server-side, like the chat gate).        */
+/* Before creation, /@username shows a friendly "not created yet"      */
+/* page (404). The page is PUBLIC by design: anyone with the link      */
+/* sees the avatar, display name, bio and the user's MANUALLY chosen   */
+/* buttons — shortened links are NEVER auto-published here.            */
+/*                                                                     */
+/* Avatars live in the same private R2 bucket as chat files            */
+/* (env.CHAT_FILES), under unguessable avatars/ keys, and are served   */
+/* publicly via GET /@username/avatar (the route checks the profile,   */
+/* not a session). The view counter increments atomically on every     */
+/* public render; the owner toggles its visibility in settings.        */
+/*                                                                     */
+/* All user content is escaped when the page is rendered               */
+/* (escapeHtml) — the template never interpolates raw user text.       */
+/* ------------------------------------------------------------------ */
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Avatar image types. GIF is excluded on purpose (animation + size);
+// the client compresses to JPEG before upload.
+const PROFILE_AVATAR_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/webp',
+]);
+
+// Validates an avatar sent as { mimeType, dataBase64 } — the same shape
+// as chat attachments (see validateChatAttachment). The decoded size
+// is capped at 2 MB (CONFIG.profileAvatarMaxBytes). Returns
+// { ok: true, avatar: { mimeType, bytes, sizeBytes } } or { ok: false, reason }.
+function validateProfileAvatar(raw) {
+  if (raw === undefined || raw === null) {
+    return { ok: false, reason: 'ფოტო არ არის არჩეული.' };
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, reason: 'ფოტო არასწორია.' };
+  }
+  const mimeType = String(raw.mimeType || '').toLowerCase().trim();
+  if (!PROFILE_AVATAR_MIME_TYPES.has(mimeType)) {
+    return { ok: false, reason: 'ფოტოს ტიპი დაუშვებელია — PNG, JPEG ან WebP შეიძლება.' };
+  }
+  let b64 = String(raw.dataBase64 || '').trim();
+  // Tolerate a data: URL prefix (some clients send the whole data URL).
+  if (b64.startsWith('data:')) {
+    const comma = b64.indexOf(',');
+    if (comma === -1) return { ok: false, reason: 'ფოტო არასწორია.' };
+    b64 = b64.slice(comma + 1);
+  }
+  b64 = b64.replace(/\s+/g, '');
+  if (!b64) return { ok: false, reason: 'ფოტო ცარიელია.' };
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+    return { ok: false, reason: 'ფოტო არასწორია.' };
+  }
+  // Cheap pre-check before decoding: base64 inflates by ~4/3. The
+  // padding chars carry no bytes, so subtract them — otherwise a
+  // file of exactly the limit is wrongly rejected.
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  if (Math.floor(b64.length * 3 / 4) - pad > CONFIG.profileAvatarMaxBytes) {
+    return { ok: false, reason: 'ფოტო ძალიან დიდია (მაქს. 2 MB).' };
+  }
+  let bytes;
+  try {
+    bytes = base64ToBytes(b64);
+  } catch {
+    return { ok: false, reason: 'ფოტო არასწორია.' };
+  }
+  if (bytes.length === 0) return { ok: false, reason: 'ფოტო ცარიელია.' };
+  if (bytes.length > CONFIG.profileAvatarMaxBytes) {
+    return { ok: false, reason: 'ფოტო ძალიან დიდია (მაქს. 2 MB).' };
+  }
+  return { ok: true, avatar: { mimeType, bytes, sizeBytes: bytes.length } };
+}
+
+// Validates a hand-typed profile link URL. Reuses the chat-link
+// validator (https only, well-formed, no credentials) and additionally
+// blocks localhost / internal / IP-literal hosts — a public profile
+// button must never point at a private address.
+function validateProfileManualUrl(raw) {
+  const lv = validateChatLinkUrl(raw);
+  if (!lv.ok) return lv;
+  if (!lv.url) return { ok: false, reason: 'ლინკი ცარიელია.' };
+  let host;
+  try {
+    host = new URL(lv.url).hostname.toLowerCase();
+  } catch {
+    return { ok: false, reason: 'ლინკი არასწორია — სრული https მისამართი ჩაწერეთ.' };
+  }
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') ||
+      host.endsWith('.internal') || host.endsWith('.lan') || host.endsWith('.home.arpa') ||
+      isIPv4(host) || isIPv6(host)) {
+    return { ok: false, reason: 'ლოკალური/შიდა მისამართები დაუშვებელია.' };
+  }
+  return { ok: true, url: lv.url };
+}
+
+// One trimmed text field with a length cap. `allowEmpty` keeps '' legal
+// (bio); otherwise an empty value is an error (display name, title).
+function validateProfileText(raw, max, label, allowEmpty) {
+  if (typeof raw !== 'string') return { ok: false, reason: label + ' ტექსტი უნდა იყოს.' };
+  const value = raw.trim();
+  if (!allowEmpty && !value) return { ok: false, reason: label + ' შეიყვანეთ.' };
+  if (value.length > max) return { ok: false, reason: `${label} მაქს. ${max} სიმბოლო შეიძლება იყოს.` };
+  return { ok: true, value };
+}
+
+// Profile + user in one row, by username (case-insensitive — /@NIKA
+// finds nika). profile_user_id is NULL when the user never created a
+// profile; the whole row is NULL when the username does not exist.
+async function getProfileByUsername(env, username) {
+  return env.DB.prepare(
+    'SELECT u.id AS user_id, u.username, u.disabled, ' +
+    'p.user_id AS profile_user_id, p.display_name, p.bio, p.avatar_r2_key, p.avatar_mime, ' +
+    'p.show_views, p.link_limit, p.view_count ' +
+    'FROM users u LEFT JOIN profiles p ON p.user_id = u.id ' +
+    'WHERE u.username = ? COLLATE NOCASE',
+  ).bind(username).first();
+}
+
+// The user's buttons in display order. Short-link rows carry their
+// alias (NULL when the underlying link was deleted — the public page
+// skips those, the editor shows them as deleted).
+async function listProfileLinks(env, userId) {
+  const rows = await env.DB.prepare(
+    'SELECT pl.id, pl.position, pl.kind, pl.link_id, pl.title, pl.url, l.alias ' +
+    'FROM profile_links pl LEFT JOIN links l ON l.id = pl.link_id ' +
+    'WHERE pl.user_id = ? ORDER BY pl.position ASC, pl.id ASC',
+  ).bind(userId).all();
+  return rows.results || [];
+}
+
+function profileLinkToJson(request, row) {
+  const isShort = row.kind === 'short';
+  return {
+    id: row.id,
+    kind: row.kind,
+    position: row.position,
+    title: row.title,
+    url: isShort ? (row.alias ? publicLink(request, row.alias) : null) : row.url,
+    alias: isShort ? (row.alias || null) : null,
+    linkId: row.link_id || null,
+    missing: isShort && !row.alias,
+  };
+}
+
+function profileToJson(request, username, profileRow, linkRows) {
+  const hasAvatar = !!profileRow.avatar_r2_key;
+  return {
+    username,
+    displayName: profileRow.display_name,
+    bio: profileRow.bio,
+    hasAvatar,
+    avatarUrl: hasAvatar ? '/@' + username + '/avatar' : null,
+    showViews: profileRow.show_views === 1,
+    linkLimit: profileRow.link_limit,
+    viewCount: profileRow.view_count,
+    linkCount: linkRows.length,
+    links: linkRows.map((r) => profileLinkToJson(request, r)),
+  };
+}
+
+/* ---------------- Public profile page template ---------------- */
+
+// Pure function: builds the whole page as one HTML string. Every
+// user-controlled value goes through escapeHtml; hrefs are rendered
+// only when they start with https:// (validated at write time, checked
+// again here). Vivid lilac + heavy glass: brighter aurora glows and
+// stronger blur/saturate than the main site, per the v8.0 design brief.
+function renderProfilePage(data) {
+  const name = escapeHtml(data.displayName || data.username);
+  const handle = escapeHtml('@' + data.username);
+  const bio = escapeHtml(data.bio || '');
+  const initial = escapeHtml((data.displayName || data.username || '?').trim().charAt(0).toUpperCase() || '?');
+  const avatarUrl = '/@' + encodeURIComponent(data.username) + '/avatar';
+  const buttons = data.links
+    .filter((l) => typeof l.href === 'string' && l.href.startsWith('https://'))
+    .map((l) => '    <a class="plink" href="' + escapeHtml(l.href) + '" target="_blank" rel="noopener">' + escapeHtml(l.title) + '</a>')
+    .join('\n');
+  const views = data.showViews
+    ? '  <p class="views">👁 ' + Number(data.viewCount || 0) + ' ნახვა</p>\n'
+    : '';
+  return '<!DOCTYPE html>\n' +
+'<html lang="ka">\n' +
+'<head>\n' +
+'<meta charset="utf-8">\n' +
+'<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +
+'<meta name="description" content="' + handle + ' — Mini Link პროფილი">\n' +
+'<title>' + name + ' — Mini Link</title>\n' +
+'<style>\n' +
+':root{color-scheme:dark}\n' +
+'*{box-sizing:border-box}\n' +
+'body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Georgian",sans-serif;color:#fff;line-height:1.5;min-height:100vh;' +
+'background-color:#170a2e;' +
+'background-image:radial-gradient(560px 340px at 12% -40px,rgba(192,132,252,.55),transparent 70%),radial-gradient(520px 340px at 95% 10%,rgba(168,85,247,.60),transparent 70%),radial-gradient(700px 460px at 50% 115%,rgba(124,58,237,.50),transparent 72%);' +
+'background-attachment:fixed;background-repeat:no-repeat}\n' +
+'.wrap{max-width:480px;margin:0 auto;padding:30px 16px 48px;text-align:center}\n' +
+'.avatar{width:112px;height:112px;border-radius:50%;object-fit:cover;border:3px solid rgba(216,180,254,.75);box-shadow:0 10px 30px rgba(168,85,247,.55);background:rgba(255,255,255,.12)}\n' +
+'.initials{width:112px;height:112px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:3rem;font-weight:800;border:3px solid rgba(216,180,254,.75);box-shadow:0 10px 30px rgba(168,85,247,.55);background:linear-gradient(135deg,#a855f7,#7c3aed 130%)}\n' +
+'h1{margin:14px 0 2px;font-size:1.6rem;font-weight:800;letter-spacing:-.01em;word-break:break-word}\n' +
+'.handle{margin:0 0 10px;color:#e9d5ff}\n' +
+'.bio{margin:0 0 22px;color:#f3e8ff;white-space:pre-wrap;word-break:break-word}\n' +
+'.plink{display:block;padding:15px 18px;margin:0 0 12px;border-radius:18px;text-decoration:none;color:#fff;font-weight:650;word-break:break-word;' +
+'background:linear-gradient(160deg,rgba(255,255,255,.20),rgba(255,255,255,.08));' +
+'-webkit-backdrop-filter:blur(28px) saturate(1.8);backdrop-filter:blur(28px) saturate(1.8);' +
+'border:1px solid rgba(216,180,254,.45);box-shadow:inset 0 1px 0 rgba(255,255,255,.25),0 10px 28px rgba(0,0,0,.35)}\n' +
+'.plink:hover{border-color:rgba(216,180,254,.8)}\n' +
+'.empty{color:#e9d5ff;margin:0 0 12px}\n' +
+'.views{color:#e9d5ff;margin:20px 0 0}\n' +
+'footer{margin-top:30px;color:#d8b4fe;font-size:.9rem}\n' +
+'footer a{color:#fff}\n' +
+'</style>\n' +
+'</head>\n' +
+'<body>\n' +
+'<main class="wrap">\n' +
+(data.hasAvatar
+  ? '  <img class="avatar" src="' + avatarUrl + '" alt="">\n'
+  : '  <span class="initials">' + initial + '</span>\n') +
+'  <h1>' + name + '</h1>\n' +
+'  <p class="handle">' + handle + '</p>\n' +
+(bio ? '  <p class="bio">' + bio + '</p>\n' : '') +
+(buttons || '  <p class="empty">ბმულები ჯერ არ დაუმატებია.</p>\n') +
+views +
+'  <footer>შექმნილია <a href="/">Mini Link</a>-ით — minilink.space</footer>\n' +
+'</main>\n' +
+'</body>\n' +
+'</html>\n';
+}
+
+// Friendly 404 page in the same visual shell: unknown username, or a
+// user who never created a profile. Both stay 404 (no profile exists
+// to show), but the message differs so the visitor knows which it is.
+function renderProfileMessagePage(title, message) {
+  return '<!DOCTYPE html>\n' +
+'<html lang="ka">\n' +
+'<head>\n' +
+'<meta charset="utf-8">\n' +
+'<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +
+'<title>' + escapeHtml(title) + ' — Mini Link</title>\n' +
+'<style>\n' +
+':root{color-scheme:dark}\n' +
+'*{box-sizing:border-box}\n' +
+'body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Georgian",sans-serif;color:#fff;line-height:1.5;min-height:100vh;' +
+'background-color:#170a2e;' +
+'background-image:radial-gradient(560px 340px at 12% -40px,rgba(192,132,252,.55),transparent 70%),radial-gradient(520px 340px at 95% 10%,rgba(168,85,247,.60),transparent 70%),radial-gradient(700px 460px at 50% 115%,rgba(124,58,237,.50),transparent 72%);' +
+'background-attachment:fixed;background-repeat:no-repeat}\n' +
+'.wrap{max-width:480px;margin:0 auto;padding:60px 16px 48px;text-align:center}\n' +
+'h1{font-size:1.4rem;margin:0 0 10px}\n' +
+'p{color:#e9d5ff}\n' +
+'a{color:#fff}\n' +
+'</style>\n' +
+'</head>\n' +
+'<body>\n' +
+'<main class="wrap">\n' +
+'  <h1>' + escapeHtml(title) + '</h1>\n' +
+'  <p>' + escapeHtml(message) + '</p>\n' +
+'  <p><a href="/">მთავარ გვერდზე დაბრუნება</a></p>\n' +
+'</main>\n' +
+'</body>\n' +
+'</html>\n';
+}
+
+async function handleProfilePage(request, env, username) {
+  await ensureV9Schema(env);
+  const row = await getProfileByUsername(env, username);
+  if (!row || row.disabled === 1) {
+    return new Response(
+      renderProfileMessagePage('მომხმარებელი არ მოიძებნა', '@' + username + ' — ასეთი მომხმარებელი არ არსებობს.'),
+      { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+    );
+  }
+  if (!row.profile_user_id) {
+    return new Response(
+      renderProfileMessagePage('პროფილი ჯერ არ არის შექმნილი', '@' + row.username + '-ს ჯერ პროფილი არ შეუქმნია.'),
+      { status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+    );
+  }
+  // Atomic view increment (single UPDATE). A failed increment never
+  // blocks the page — availability first, like link click counting.
+  let viewCount = row.view_count || 0;
+  try {
+    await env.DB.prepare(
+      'UPDATE profiles SET view_count = view_count + 1 WHERE user_id = ?',
+    ).bind(row.user_id).run();
+    viewCount += 1;
+  } catch (e) {
+    console.error('profile view increment failed:', e && e.message ? e.message : e);
+  }
+  const linkRows = await listProfileLinks(env, row.user_id);
+  const links = linkRows
+    .map((r) => profileLinkToJson(request, r))
+    .filter((l) => !l.missing && l.url)
+    .map((l) => ({ title: l.title, href: l.url }));
+  return new Response(renderProfilePage({
+    username: row.username,
+    displayName: row.display_name,
+    bio: row.bio,
+    hasAvatar: !!row.avatar_r2_key,
+    showViews: row.show_views === 1,
+    viewCount,
+    links,
+  }), {
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
+}
+
+// Serves the profile avatar publicly (no session — the profile page is
+// public). Content-Type comes from the stored allowlisted mime type +
+// nosniff, so a stored file can never run as a page.
+async function handleProfileAvatar(request, env, username) {
+  await ensureV9Schema(env);
+  const row = await getProfileByUsername(env, username);
+  if (!row || row.disabled === 1 || !row.profile_user_id || !row.avatar_r2_key) {
+    return new Response('Not found', { status: 404 });
+  }
+  if (!env.CHAT_FILES) return error('ფაილების საცავი მიუწვდომელია.', 500);
+  const obj = await env.CHAT_FILES.get(row.avatar_r2_key);
+  if (!obj) return new Response('Not found', { status: 404 });
+  return new Response(await obj.arrayBuffer(), {
+    headers: {
+      'Content-Type': row.avatar_mime || 'application/octet-stream',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'public, max-age=3600',
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* Static frontend (ASSETS binding, or embedded copy in single-file build) */
 /* ------------------------------------------------------------------ */
 
@@ -1912,6 +2319,9 @@ async function handleApi(request, env, url) {
   // v7.3 schema (chat_attachments.r2_key) — same lazy pattern, see
   // ensureV8Schema.
   await ensureV8Schema(env);
+  // v8.0 schema (profiles, profile_links) — same lazy pattern, see
+  // ensureV9Schema.
+  await ensureV9Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -2396,6 +2806,13 @@ async function handleApi(request, env, url) {
     }
     if (method === 'DELETE') {
       if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      // v8.0: drop profile buttons that pointed at the link FIRST —
+      // deleting the link row first would violate the profile_links
+      // foreign key where FK enforcement is on. Best-effort: the
+      // profiles table may not exist yet.
+      try {
+        await env.DB.prepare('DELETE FROM profile_links WHERE link_id = ?').bind(id).run();
+      } catch { /* ignore */ }
       const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
       if (!res.success || (res.meta && res.meta.changes === 0)) {
         return error('ბმული არ მოიძებნა.', 404);
@@ -2525,6 +2942,310 @@ async function handleApi(request, env, url) {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     await env.DB.prepare('UPDATE chat_threads SET user_unread = 0 WHERE user_id = ?').bind(userSession.userId).run();
     return json({ ok: true });
+  }
+
+  // --- v8.0: profile pages — user side ---------------------------------
+  // Creation is EXPLICIT and gated on email verification (same
+  // server-side gate as the chat). The public page (/@username) is
+  // rendered by handleProfilePage, outside handleApi.
+
+  // Per-user write rate limit shared by all profile mutations.
+  async function profileWriteAllowed(userId) {
+    return rateLimit(env, `profile-write:${userId}`, CONFIG.profileWriteMaxPerMin, 60);
+  }
+
+  // Create the caller's profile with defaults (display name = username,
+  // empty bio, view counter ON, link limit 5). 409 when one exists.
+  if (path === '/api/profile' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('პროფილის შექმნა მხოლოდ მეილზე დადასტურებულ მომხმარებლებს შეუძლიათ.', 403);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const existing = await env.DB.prepare(
+      'SELECT user_id FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (existing) return error('პროფილი უკვე შექმნილია.', 409);
+    const now = new Date().toISOString();
+    const ins = await env.DB.prepare(
+      'INSERT INTO profiles (user_id, display_name, bio, show_views, link_limit, view_count, created_at, updated_at) ' +
+      'VALUES (?, ?, ?, 1, ?, 0, ?, ?)',
+    ).bind(userSession.userId, userSession.username, '', CONFIG.profileDefaultLinkLimit, now, now).run();
+    if (!ins.success) return error('პროფილის შექმნა ვერ მოხერხდა.', 500);
+    const row = await env.DB.prepare(
+      'SELECT display_name, bio, avatar_r2_key, show_views, link_limit, view_count FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    return json({ profile: profileToJson(request, userSession.username, row, []) }, 201);
+  }
+
+  // The caller's own profile + buttons (ordered) + counts + limit.
+  // No profile yet -> { profile: null }. Any logged-in user may call
+  // this (the editor needs to know whether a profile exists); the
+  // verified gate applies to creation and mutations, not to reading.
+  if (path === '/api/profile/me' && method === 'GET') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const row = await env.DB.prepare(
+      'SELECT display_name, bio, avatar_r2_key, show_views, link_limit, view_count FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!row) return json({ profile: null });
+    const linkRows = await listProfileLinks(env, userSession.userId);
+    return json({ profile: profileToJson(request, userSession.username, row, linkRows) });
+  }
+
+  // Update display name / bio / view-counter visibility.
+  if (path === '/api/profile' && method === 'PATCH') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const existing = await env.DB.prepare(
+      'SELECT display_name, bio, avatar_r2_key, show_views, link_limit, view_count FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!existing) return error('პროფილი არ მოიძებნა.', 404);
+    const updates = [];
+    const values = [];
+    if ('display_name' in parsed.body) {
+      const dv = validateProfileText(parsed.body.display_name, CONFIG.profileMaxDisplayName, 'სახელი', false);
+      if (!dv.ok) return error(dv.reason, 400);
+      updates.push('display_name = ?');
+      values.push(dv.value);
+    }
+    if ('bio' in parsed.body) {
+      const bv = validateProfileText(parsed.body.bio, CONFIG.profileMaxBio, 'ბიო', true);
+      if (!bv.ok) return error(bv.reason, 400);
+      updates.push('bio = ?');
+      values.push(bv.value);
+    }
+    if ('show_views' in parsed.body) {
+      if (typeof parsed.body.show_views !== 'boolean') {
+        return error('ველის "show_views" მნიშვნელობა true ან false უნდა იყოს.', 400);
+      }
+      updates.push('show_views = ?');
+      values.push(parsed.body.show_views ? 1 : 0);
+    }
+    if (updates.length === 0) return error('შესაცვლელი არაფერია.', 400);
+    updates.push('updated_at = ?');
+    values.push(new Date().toISOString());
+    values.push(userSession.userId);
+    await env.DB.prepare(
+      `UPDATE profiles SET ${updates.join(', ')} WHERE user_id = ?`,
+    ).bind(...values).run();
+    const row = await env.DB.prepare(
+      'SELECT display_name, bio, avatar_r2_key, show_views, link_limit, view_count FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    const linkRows = await listProfileLinks(env, userSession.userId);
+    return json({ profile: profileToJson(request, userSession.username, row, linkRows) });
+  }
+
+  // Upload/replace the avatar. Bytes go to the private R2 bucket
+  // (avatars/<uuid>); the old object is deleted after a successful
+  // replace. The new object is uploaded FIRST so a failed put never
+  // leaves the profile pointing at missing bytes.
+  if (path === '/api/profile/avatar' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('პროფილის მართვა მხოლოდ მეილზე დადასტურებულ მომხმარებლებს შეუძლიათ.', 403);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const existing = await env.DB.prepare(
+      'SELECT avatar_r2_key FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!existing) return error('პროფილი არ მოიძებნა.', 404);
+    const raw = parsed.body.avatar !== undefined ? parsed.body.avatar : parsed.body;
+    const av = validateProfileAvatar(raw);
+    if (!av.ok) return error(av.reason, 400);
+    if (!env.CHAT_FILES) {
+      return error('ფაილების საცავი (R2) არ არის დაკავშირებული — ავატარის ატვირთვა შეუძლებელია.', 500);
+    }
+    const r2Key = 'avatars/' + crypto.randomUUID();
+    await env.CHAT_FILES.put(r2Key, av.avatar.bytes, {
+      httpMetadata: { contentType: av.avatar.mimeType },
+    });
+    try {
+      await env.DB.prepare(
+        'UPDATE profiles SET avatar_r2_key = ?, avatar_mime = ?, updated_at = ? WHERE user_id = ?',
+      ).bind(r2Key, av.avatar.mimeType, new Date().toISOString(), userSession.userId).run();
+    } catch (e) {
+      // Don't orphan the new R2 object if the row update fails.
+      try { await env.CHAT_FILES.delete(r2Key); } catch { /* best-effort */ }
+      throw e;
+    }
+    if (existing.avatar_r2_key) {
+      try { await env.CHAT_FILES.delete(existing.avatar_r2_key); } catch { /* best-effort, ignore missing */ }
+    }
+    return json({ ok: true, avatarUrl: '/@' + userSession.username + '/avatar' });
+  }
+
+  // Remove the avatar (fields cleared + R2 object deleted, best-effort).
+  // Idempotent: no avatar -> success, nothing to do.
+  if (path === '/api/profile/avatar' && method === 'DELETE') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const existing = await env.DB.prepare(
+      'SELECT avatar_r2_key FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!existing) return error('პროფილი არ მოიძებნა.', 404);
+    const oldKey = existing.avatar_r2_key;
+    await env.DB.prepare(
+      'UPDATE profiles SET avatar_r2_key = NULL, avatar_mime = NULL, updated_at = ? WHERE user_id = ?',
+    ).bind(new Date().toISOString(), userSession.userId).run();
+    if (oldKey && env.CHAT_FILES) {
+      try { await env.CHAT_FILES.delete(oldKey); } catch { /* best-effort, ignore missing */ }
+    }
+    return json({ ok: true });
+  }
+
+  // Add a button to the profile. kind 'short' picks one of the user's
+  // own links (ownership enforced); kind 'manual' stores a hand-typed
+  // https URL. The per-user limit is enforced here (409 limit_reached);
+  // the client shows the "write to the admin" popup on that code.
+  if (path === '/api/profile/links' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!userSession.emailVerified) return error('პროფილის მართვა მხოლოდ მეილზე დადასტურებულ მომხმარებლებს შეუძლიათ.', 403);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const profile = await env.DB.prepare(
+      'SELECT link_limit FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!profile) return error('პროფილი არ მოიძებნა.', 404);
+    const kind = parsed.body.kind;
+    if (kind !== 'short' && kind !== 'manual') return error('ბმულის ტიპი არასწორია.', 400);
+    const tv = validateProfileText(parsed.body.title, CONFIG.profileMaxTitle, 'სათაური', false);
+    if (!tv.ok) return error(tv.reason, 400);
+    let linkId = null;
+    let url = '';
+    if (kind === 'short') {
+      const id = parseInt(parsed.body.link_id, 10);
+      if (!Number.isFinite(id) || id <= 0) return error('ბმული არასწორია.', 400);
+      const own = await env.DB.prepare('SELECT user_id FROM links WHERE id = ?').bind(id).first();
+      if (!own) return error('ბმული არ მოიძებნა.', 404);
+      if (own.user_id !== userSession.userId) return error('ეს ბმული თქვენ არ გეკუთვნით.', 403);
+      linkId = id;
+    } else {
+      const uv = validateProfileManualUrl(parsed.body.url);
+      if (!uv.ok) return error(uv.reason, 400);
+      url = uv.url;
+    }
+    const countRow = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM profile_links WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if ((countRow ? countRow.n : 0) >= profile.link_limit) {
+      return json({ error: 'limit_reached', message: 'ბმულების ლიმიტი ამოიწურა — მეტისთვის ადმინს მიწერეთ.' }, 409);
+    }
+    const posRow = await env.DB.prepare(
+      'SELECT COALESCE(MAX(position), -1) AS m FROM profile_links WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    const position = (posRow ? posRow.m : -1) + 1;
+    const ins = await env.DB.prepare(
+      'INSERT INTO profile_links (user_id, position, kind, link_id, title, url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).bind(userSession.userId, position, kind, linkId, tv.value, url, new Date().toISOString()).run();
+    if (!ins.success) return error('ბმულის დამატება ვერ მოხერხდა.', 500);
+    const row = await env.DB.prepare(
+      'SELECT pl.id, pl.position, pl.kind, pl.link_id, pl.title, pl.url, l.alias ' +
+      'FROM profile_links pl LEFT JOIN links l ON l.id = pl.link_id WHERE pl.id = ?',
+    ).bind(ins.meta.last_row_id).first();
+    return json({ link: profileLinkToJson(request, row) }, 201);
+  }
+
+  // Reorder the profile buttons. ordered_ids must contain EXACTLY the
+  // user's button ids (no foreign ids, none missing) — positions are
+  // then rewritten 0..n in that order.
+  if (path === '/api/profile/links/reorder' && method === 'POST') {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const profile = await env.DB.prepare(
+      'SELECT user_id FROM profiles WHERE user_id = ?',
+    ).bind(userSession.userId).first();
+    if (!profile) return error('პროფილი არ მოიძებნა.', 404);
+    const ids = parsed.body.ordered_ids;
+    if (!Array.isArray(ids)) return error('ველის "ordered_ids" მასივი უნდა იყოს.', 400);
+    const rows = await env.DB.prepare(
+      'SELECT id FROM profile_links WHERE user_id = ?',
+    ).bind(userSession.userId).all();
+    const ownIds = new Set((rows.results || []).map((r) => r.id));
+    const seen = new Set();
+    for (const rawId of ids) {
+      const id = parseInt(rawId, 10);
+      if (!Number.isFinite(id) || !ownIds.has(id) || seen.has(id)) {
+        return error('სია არასწორია — ყველა ბმული თქვენი უნდა იყოს.', 400);
+      }
+      seen.add(id);
+    }
+    if (seen.size !== ownIds.size) return error('სია არასრულია — ყველა ბმული უნდა იყოს შეტანილი.', 400);
+    const stmts = ids.map((rawId, i) => env.DB.prepare(
+      'UPDATE profile_links SET position = ? WHERE id = ? AND user_id = ?',
+    ).bind(i, parseInt(rawId, 10), userSession.userId));
+    if (stmts.length) await env.DB.batch(stmts);
+    return json({ ok: true });
+  }
+
+  // Edit / delete one profile button. Ownership is enforced; the URL
+  // is editable only for manual buttons (short buttons keep pointing
+  // at their link — its destination never changes here).
+  const profileLinkMatch = path.match(/^\/api\/profile\/links\/(\d+)$/);
+  if (profileLinkMatch) {
+    const userSession = await getUserSession(env, request);
+    if (!userSession) return error('შესვლა საჭიროა.', 401);
+    const id = parseInt(profileLinkMatch[1], 10);
+    const row = await env.DB.prepare(
+      'SELECT user_id, kind FROM profile_links WHERE id = ?',
+    ).bind(id).first();
+    if (!row) return error('ბმული არ მოიძებნა.', 404);
+    if (row.user_id !== userSession.userId) return error('ეს ბმული თქვენ არ გეკუთვნით.', 403);
+    if (method === 'PATCH') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+      const parsed = await readJson(request);
+      if (!parsed.ok) return error(parsed.reason, 400);
+      const updates = [];
+      const values = [];
+      if ('title' in parsed.body) {
+        const tv = validateProfileText(parsed.body.title, CONFIG.profileMaxTitle, 'სათაური', false);
+        if (!tv.ok) return error(tv.reason, 400);
+        updates.push('title = ?');
+        values.push(tv.value);
+      }
+      if ('url' in parsed.body) {
+        if (row.kind !== 'manual') return error('მოკლე ბმულის მისამართი არ იცვლება.', 400);
+        const uv = validateProfileManualUrl(parsed.body.url);
+        if (!uv.ok) return error(uv.reason, 400);
+        updates.push('url = ?');
+        values.push(uv.url);
+      }
+      if (updates.length === 0) return error('შესაცვლელი არაფერია.', 400);
+      values.push(id);
+      await env.DB.prepare(
+        `UPDATE profile_links SET ${updates.join(', ')} WHERE id = ?`,
+      ).bind(...values).run();
+      const fresh = await env.DB.prepare(
+        'SELECT pl.id, pl.position, pl.kind, pl.link_id, pl.title, pl.url, l.alias ' +
+        'FROM profile_links pl LEFT JOIN links l ON l.id = pl.link_id WHERE pl.id = ?',
+      ).bind(id).first();
+      return json({ link: profileLinkToJson(request, fresh) });
+    }
+    if (method === 'DELETE') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      if (!await profileWriteAllowed(userSession.userId)) return error('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', 429);
+      await env.DB.prepare('DELETE FROM profile_links WHERE id = ?').bind(id).run();
+      return json({ ok: true });
+    }
+    return error('მეთოდი დაუშვებელია.', 405);
   }
 
   // --- Everything below requires a session ---------------------------
@@ -2753,6 +3474,13 @@ async function handleApi(request, env, url) {
     }
     if (method === 'DELETE') {
       if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      // v8.0: drop profile buttons that pointed at the link FIRST —
+      // deleting the link row first would violate the profile_links
+      // foreign key where FK enforcement is on. Best-effort: the
+      // profiles table may not exist yet.
+      try {
+        await env.DB.prepare('DELETE FROM profile_links WHERE link_id = ?').bind(id).run();
+      } catch { /* ignore */ }
       const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
       if (!res.success || (res.meta && res.meta.changes === 0)) {
         return error('ბმული არ მოიძებნა.', 404);
@@ -2816,12 +3544,18 @@ async function handleApi(request, env, url) {
 
   // --- Admin: list users -------------------------------------------------
   // Never returns password hashes. link_count counts the user's own links,
-  // qr_count counts the user's saved QR codes (v5 favorites).
+  // qr_count counts the user's saved QR codes (v5 favorites). v8.0 adds
+  // the profile summary (has_profile + button count/limit/view count) so
+  // the user modal can show the profile section without another call.
   if (path === '/api/admin/users' && method === 'GET') {
     const rows = await env.DB.prepare(
       'SELECT u.id, u.username, u.email, u.email_verified, u.disabled, u.created_at, ' +
       '(SELECT COUNT(*) FROM links WHERE user_id = u.id) AS link_count, ' +
-      '(SELECT COUNT(*) FROM qr_favorites WHERE user_id = u.id) AS qr_count ' +
+      '(SELECT COUNT(*) FROM qr_favorites WHERE user_id = u.id) AS qr_count, ' +
+      'EXISTS (SELECT 1 FROM profiles WHERE user_id = u.id) AS has_profile, ' +
+      '(SELECT COUNT(*) FROM profile_links WHERE user_id = u.id) AS profile_link_count, ' +
+      '(SELECT link_limit FROM profiles WHERE user_id = u.id) AS profile_link_limit, ' +
+      '(SELECT view_count FROM profiles WHERE user_id = u.id) AS profile_view_count ' +
       'FROM users u ORDER BY u.created_at DESC',
     ).all();
     return json({
@@ -2834,6 +3568,10 @@ async function handleApi(request, env, url) {
         createdAt: r.created_at,
         linkCount: r.link_count,
         qrCount: r.qr_count,
+        hasProfile: r.has_profile === 1,
+        profileLinkCount: r.profile_link_count || 0,
+        profileLinkLimit: r.profile_link_limit === null || r.profile_link_limit === undefined ? null : r.profile_link_limit,
+        profileViewCount: r.profile_view_count || 0,
       })),
     });
   }
@@ -2876,10 +3614,50 @@ async function handleApi(request, env, url) {
       ).bind(userId).run();
       await env.DB.prepare('DELETE FROM user_sessions WHERE user_id = ?').bind(userId).run();
       await env.DB.prepare('DELETE FROM email_codes WHERE user_id = ?').bind(userId).run();
+      // v8.0: the user's profile + buttons go with the account. The
+      // avatar R2 object is deleted best-effort — a leftover orphan
+      // object is harmless (unguessable key, no references left).
+      try {
+        const prof = await env.DB.prepare('SELECT avatar_r2_key FROM profiles WHERE user_id = ?').bind(userId).first();
+        await env.DB.prepare('DELETE FROM profile_links WHERE user_id = ?').bind(userId).run();
+        await env.DB.prepare('DELETE FROM profiles WHERE user_id = ?').bind(userId).run();
+        if (prof && prof.avatar_r2_key && env.CHAT_FILES) {
+          try { await env.CHAT_FILES.delete(prof.avatar_r2_key); } catch { /* best-effort */ }
+        }
+      } catch { /* profiles table may not exist yet */ }
       await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
       return json({ ok: true, linksAnonymized: (anon.meta && anon.meta.changes) || 0 });
     }
     return error('მეთოდი დაუშვებელია.', 405);
+  }
+
+  // --- v8.0: admin sets one user's profile button limit --------------
+  // The limit lives on the profiles row, so a user without a profile
+  // gets 404 profile_not_found — the admin grants extra buttons only
+  // to existing profiles (the user asks via the admin chat).
+  const adminLinkLimitMatch = path.match(/^\/api\/admin\/users\/(\d+)\/link-limit$/);
+  if (adminLinkLimitMatch) {
+    if (method !== 'POST') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const userId = parseInt(adminLinkLimitMatch[1], 10);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const limit = parsed.body.link_limit;
+    if (!Number.isInteger(limit) || limit < 1 || limit > CONFIG.profileMaxLinkLimit) {
+      return error(`ლიმიტი 1–${CONFIG.profileMaxLinkLimit} შორის უნდა იყოს.`, 400);
+    }
+    const user = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first();
+    if (!user) return error('მომხმარებელი არ მოიძებნა.', 404);
+    const profile = await env.DB.prepare(
+      'SELECT user_id FROM profiles WHERE user_id = ?',
+    ).bind(userId).first();
+    if (!profile) {
+      return json({ error: 'profile_not_found', message: 'მომხმარებელს პროფილი არ აქვს შექმნილი.' }, 404);
+    }
+    await env.DB.prepare(
+      'UPDATE profiles SET link_limit = ?, updated_at = ? WHERE user_id = ?',
+    ).bind(limit, new Date().toISOString(), userId).run();
+    return json({ ok: true, linkLimit: limit });
   }
 
   // --- v7.0/v7.1: admin chat — admin side ---------------------------
@@ -3106,6 +3884,20 @@ export default {
       // API.
       if (path.startsWith('/api/')) {
         return await handleApi(request, env, url);
+      }
+
+      // v8.0: public profile pages /@username and avatars /@username/avatar.
+      // Registered BEFORE the short-link redirect: aliases never contain
+      // '@', so these paths can never be a link alias.
+      const avatarMatch = path.match(/^\/@([A-Za-z0-9_.-]{3,32})\/avatar$/);
+      if (request.method === 'GET' && avatarMatch) {
+        return await handleProfileAvatar(request, env, avatarMatch[1]);
+      }
+      const profileMatch = path.match(/^\/@([A-Za-z0-9_.-]{3,32})$/);
+      if (request.method === 'GET' && profileMatch) {
+        const allowed = await checkRateLimit(request, env, 'profile-view', CONFIG.redirectMaxPerMin, 60);
+        if (!allowed) return new Response('ძალიან ბევრი მოთხოვნა. სცადეთ ერთ წუთში.', { status: 429 });
+        return await handleProfilePage(request, env, profileMatch[1]);
       }
 
       // Public short-link redirect: /<alias>

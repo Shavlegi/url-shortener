@@ -679,6 +679,21 @@ async function openProfile(user) {
   $('profile-count').textContent = 'ბმულები იტვირთება…';
   $('profile-links').innerHTML = '';
   $('profile-links-empty').hidden = true;
+  // v8.0: public profile page section (profile fields come with the
+  // users list, so no extra call is needed).
+  const hasProfile = !!user.hasProfile;
+  $('profile-page-status').textContent = hasProfile
+    ? `🌐 პროფილი: ${user.profileLinkCount || 0} / ${user.profileLinkLimit ?? 5} ბმული · 👁 ${user.profileViewCount || 0} ნახვა`
+    : '🌐 პროფილი: არ აქვს შექმნილი';
+  $('profile-page-link-row').hidden = !hasProfile;
+  if (hasProfile) {
+    const pageLink = $('profile-page-link');
+    pageLink.href = 'https://minilink.space/@' + user.username;
+    pageLink.textContent = 'minilink.space/@' + user.username;
+  }
+  $('profile-limit-row').hidden = !hasProfile;
+  if (hasProfile) $('profile-limit-input').value = String(user.profileLinkLimit ?? 5);
+  hideError($('profile-limit-error'));
   $('profile-modal').hidden = false;
   try {
     // Fresh load without the links search filter, so the profile is complete.
@@ -737,6 +752,32 @@ $('profile-delete-btn').addEventListener('click', async () => {
   if (!user) return;
   const ok = await removeUser(user);
   if (ok) $('profile-modal').hidden = true;
+});
+
+// v8.0: raise/lower one user's profile button limit (1–100). The
+// server returns 404 profile_not_found when the user has no profile.
+$('profile-limit-save-btn').addEventListener('click', async () => {
+  const user = currentProfileUser;
+  if (!user) return;
+  const err = $('profile-limit-error');
+  hideError(err);
+  const limit = parseInt($('profile-limit-input').value, 10);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    showError(err, 'ლიმიტი 1–100 შორის უნდა იყოს.');
+    return;
+  }
+  try {
+    await api('/api/admin/users/' + user.id + '/link-limit', {
+      method: 'POST',
+      body: JSON.stringify({ link_limit: limit }),
+    });
+    user.profileLinkLimit = limit;
+    toast('ლიმიტი შენახულია');
+    loadUsers();
+    openProfile(user);
+  } catch (e) {
+    showError(err, e.message || 'შენახვა ვერ მოხერხდა.');
+  }
 });
 
 $('profile-close').addEventListener('click', () => { $('profile-modal').hidden = true; });

@@ -12,6 +12,14 @@ let authMyLinks = [];
 let authPendingEmail = '';
 let authSearchTimer = null;
 
+// Profile state (v8.0): the logged-in user's public page at /@username.
+// myProfile is null until loaded, or when the user has no profile yet.
+let myProfile = null;
+let profileLoaded = false;
+let profileAddMode = 'short'; // 'short' | 'manual'
+let profileLinkEditingId = null;
+let profileAvatarBusy = false;
+
 async function authApi(path, options = {}) {
   const res = await fetch(path, {
     credentials: 'same-origin',
@@ -73,6 +81,12 @@ function setLoggedIn(user) {
   el('chat-card').hidden = !showChat;
   if (showChat) startUserChat();
   else stopUserChat();
+  // v8.0: logged-in navigation (top bar) + profile editor.
+  if (user) {
+    el('user-topbar').hidden = false;
+    updateNavMenu();
+    loadMyProfile();
+  }
   // v5: QR favorites switch to the server list when logged in.
   if (typeof loadQrFavorites === 'function') loadQrFavorites();
 }
@@ -85,6 +99,15 @@ function setLoggedOut() {
   el('my-links-card').hidden = true;
   el('chat-card').hidden = true;
   stopUserChat();
+  // v8.0: hide the navigation + profile UI and drop profile state.
+  el('user-topbar').hidden = true;
+  el('nav-menu').hidden = true;
+  el('profile-card').hidden = true;
+  el('settings-modal').hidden = true;
+  myProfile = null;
+  profileLoaded = false;
+  profileLinkEditingId = null;
+  hideError(el('profile-error'));
   renderMyLinks();
   // v5: QR favorites fall back to this device's localStorage list.
   if (typeof loadQrFavorites === 'function') loadQrFavorites();
@@ -769,6 +792,539 @@ el('user-chat-form').addEventListener('submit', async (e) => {
   } finally {
     btn.disabled = false;
   }
+});
+
+/* ---------------- Profile pages (v8.0) ---------------- */
+// Public page at /@username. Creation is EXPLICIT and requires a
+// verified email (the server enforces the same gate). Buttons are
+// MANUALLY curated: nothing auto-publishes — the user adds chosen
+// short links or hand-typed https URLs. The view-counter toggle lives
+// ONLY in the settings panel; the editor shows the count + a hint.
+// All user content is rendered with the DOM API (textContent), never
+// innerHTML, so no markup can break out.
+
+function profilePageUrl() {
+  if (!authUser) return '';
+  return window.location.origin + '/@' + authUser.username;
+}
+
+function updateNavMenu() {
+  const item = el('nav-menu-profile');
+  item.textContent = myProfile ? '🌐 პროფილის რედაქტირება' : '🌐 პროფილის შექმნა';
+  // Top-right button shows the avatar when the profile has one.
+  const img = el('nav-avatar-img');
+  const fallback = el('nav-avatar-fallback');
+  if (myProfile && myProfile.hasAvatar && authUser) {
+    img.src = '/@' + authUser.username + '/avatar?v=' + Date.now();
+    img.hidden = false;
+    fallback.hidden = true;
+  } else {
+    img.hidden = true;
+    img.removeAttribute('src');
+    fallback.hidden = false;
+  }
+}
+
+async function loadMyProfile() {
+  try {
+    const data = await authApi('/api/profile/me');
+    myProfile = data.profile || null;
+    profileLoaded = true;
+    renderProfileEditor();
+    updateNavMenu();
+    updateSettingsToggle();
+  } catch (e) {
+    // Logged-out users (401) never reach this; a real failure just
+    // leaves the profile card hidden — the menu still says "შექმნა".
+    profileLoaded = false;
+  }
+}
+
+function renderProfileEditor() {
+  if (!authUser) return;
+  const card = el('profile-card');
+  card.hidden = false;
+  const createBox = el('profile-create-box');
+  const editBox = el('profile-edit-box');
+  hideError(el('profile-error'));
+  if (!myProfile) {
+    createBox.hidden = false;
+    editBox.hidden = true;
+    el('profile-create-url').textContent = profilePageUrl();
+    const unverified = !authUser.emailVerified;
+    el('profile-create-unverified').hidden = !unverified;
+    el('profile-create-btn').disabled = unverified;
+    return;
+  }
+  createBox.hidden = true;
+  editBox.hidden = false;
+
+  el('profile-views-line').textContent =
+    `👁 ${myProfile.viewCount} ნახვა · მრიცხველი ${myProfile.showViews ? 'ჩანს' : 'გამორთულია'} (იცვლება პარამეტრებში)`;
+  const viewLink = el('profile-view-link');
+  viewLink.href = profilePageUrl();
+  viewLink.textContent = profilePageUrl().replace(/^https?:\/\//, '');
+
+  renderProfileAvatarPreview();
+  el('profile-display-name').value = myProfile.displayName || '';
+  el('profile-bio').value = myProfile.bio || '';
+  el('profile-links-count').textContent = `${myProfile.links.length} / ${myProfile.linkLimit}`;
+  renderProfileLinks();
+}
+
+function renderProfileAvatarPreview() {
+  const img = el('profile-avatar-preview');
+  const initials = el('profile-avatar-initials');
+  const removeBtn = el('profile-avatar-remove-btn');
+  if (myProfile && myProfile.hasAvatar && authUser) {
+    img.src = '/@' + authUser.username + '/avatar?v=' + Date.now();
+    img.hidden = false;
+    initials.hidden = true;
+    removeBtn.hidden = false;
+  } else {
+    img.hidden = true;
+    img.removeAttribute('src');
+    const first = ((myProfile && myProfile.displayName) || (authUser && authUser.username) || '?').trim().charAt(0).toUpperCase() || '?';
+    initials.textContent = first;
+    initials.hidden = false;
+    removeBtn.hidden = true;
+  }
+}
+
+// Compresses/resizes the avatar to max 512px (canvas, JPEG ~0.85, white
+// background) — the same pattern as chat image compression in app.js.
+// The server still enforces the 2 MB cap on decoded bytes.
+function prepareProfileAvatar(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSide = 512;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const out = canvas.toDataURL('image/jpeg', 0.85);
+        const comma = out.indexOf(',');
+        resolve({ mimeType: 'image/jpeg', dataBase64: out.slice(comma + 1) });
+      };
+      img.onerror = () => reject(new Error('ფოტოს წაკითხვა ვერ მოხერხდა.'));
+      img.src = reader.result;
+    };
+    reader.onerror = () => reject(new Error('ფოტოს წაკითხვა ვერ მოხერხდა.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderProfileLinks() {
+  const list = el('profile-links-list');
+  list.innerHTML = '';
+  const links = myProfile ? myProfile.links : [];
+  el('profile-links-empty').hidden = links.length !== 0;
+  links.forEach((link, i) => list.appendChild(profileLinkRow(link, i, links.length)));
+}
+
+function profileLinkRow(link, index, total) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const title = document.createElement('span');
+  title.className = 'link-alias';
+  title.textContent = link.title;
+  top.appendChild(title);
+  const badge = document.createElement('span');
+  if (link.missing) {
+    badge.className = 'badge expired';
+    badge.textContent = 'წაშლილია';
+  } else {
+    badge.className = 'badge on';
+    badge.textContent = link.kind === 'short' ? 'მოკლე ბმული' : 'ხელით';
+  }
+  top.appendChild(badge);
+  card.appendChild(top);
+
+  const dest = document.createElement('p');
+  dest.className = 'link-dest';
+  if (link.url) {
+    const a = document.createElement('a');
+    a.href = link.url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = link.url;
+    dest.appendChild(a);
+  } else {
+    dest.textContent = 'ბმული წაშლილია — წაშალეთ ეს ღილაკიც.';
+  }
+  card.appendChild(dest);
+
+  const actions = document.createElement('div');
+  actions.className = 'link-actions';
+
+  const upBtn = document.createElement('button');
+  upBtn.className = 'btn small';
+  upBtn.textContent = '↑';
+  upBtn.title = 'ზემოთ';
+  upBtn.disabled = index === 0;
+  upBtn.addEventListener('click', () => moveProfileLink(index, -1));
+  actions.appendChild(upBtn);
+
+  const downBtn = document.createElement('button');
+  downBtn.className = 'btn small';
+  downBtn.textContent = '↓';
+  downBtn.title = 'ქვემოთ';
+  downBtn.disabled = index === total - 1;
+  downBtn.addEventListener('click', () => moveProfileLink(index, 1));
+  actions.appendChild(downBtn);
+
+  const editBtn = document.createElement('button');
+  editBtn.className = 'btn small';
+  editBtn.textContent = '✏️';
+  editBtn.title = 'რედაქტირება';
+  editBtn.addEventListener('click', () => openProfileLinkModal(link));
+  actions.appendChild(editBtn);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'btn small danger';
+  delBtn.textContent = 'წაშლა';
+  delBtn.addEventListener('click', async () => {
+    if (!window.confirm('ნამდვილად წავშალო ღილაკი „' + link.title + '"?')) return;
+    try {
+      await authApi('/api/profile/links/' + link.id, { method: 'DELETE' });
+      toast('ღილაკი წაიშალა');
+      loadMyProfile();
+    } catch (e) { showError(el('profile-error'), e.message || 'წაშლა ვერ მოხერხდა.'); }
+  });
+  actions.appendChild(delBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+async function moveProfileLink(index, dir) {
+  if (!myProfile) return;
+  const links = myProfile.links.slice();
+  const j = index + dir;
+  if (j < 0 || j >= links.length) return;
+  const tmp = links[index];
+  links[index] = links[j];
+  links[j] = tmp;
+  try {
+    await authApi('/api/profile/links/reorder', {
+      method: 'POST',
+      body: JSON.stringify({ ordered_ids: links.map((l) => l.id) }),
+    });
+    myProfile.links = links;
+    renderProfileLinks();
+  } catch (e) {
+    showError(el('profile-error'), e.message || 'გადალაგება ვერ მოხერხდა.');
+    loadMyProfile();
+  }
+}
+
+function openProfileLimitModal() {
+  el('profile-limit-modal-count').textContent = myProfile ? String(myProfile.linkLimit) : '5';
+  el('profile-limit-modal').hidden = false;
+}
+
+function populateProfileShortSelect() {
+  const select = el('profile-add-short-select');
+  select.innerHTML = '';
+  for (const link of authMyLinks) {
+    const opt = document.createElement('option');
+    opt.value = String(link.id);
+    opt.textContent = link.shortUrl.replace(/^https?:\/\//, '') + (link.note ? ' · ' + link.note : '');
+    select.appendChild(opt);
+  }
+  el('profile-add-short-empty').hidden = authMyLinks.length !== 0;
+  select.hidden = authMyLinks.length === 0;
+}
+
+function setProfileAddMode(mode) {
+  profileAddMode = mode;
+  el('profile-add-tab-short').classList.toggle('active', mode === 'short');
+  el('profile-add-tab-manual').classList.toggle('active', mode === 'manual');
+  el('profile-add-short-box').hidden = mode !== 'short';
+  el('profile-add-manual-box').hidden = mode !== 'manual';
+}
+
+function openProfileLinkModal(link) {
+  profileLinkEditingId = link.id;
+  el('profile-link-modal-title').value = link.title;
+  el('profile-link-modal-url-field').hidden = link.kind !== 'manual';
+  el('profile-link-modal-url').value = link.kind === 'manual' ? (link.url || '') : '';
+  hideError(el('profile-link-modal-error'));
+  el('profile-link-modal').hidden = false;
+}
+
+/* --- Settings panel (v8.0): all user settings + view-counter toggle --- */
+
+function updateSettingsToggle() {
+  const toggle = el('settings-show-views');
+  if (myProfile) {
+    toggle.checked = !!myProfile.showViews;
+    toggle.disabled = false;
+    el('settings-no-profile-hint').hidden = true;
+  } else {
+    toggle.checked = false;
+    toggle.disabled = true;
+    el('settings-no-profile-hint').hidden = false;
+  }
+}
+
+function openSettings() {
+  if (!authUser) return;
+  el('settings-account').textContent = '@' + authUser.username + ' · ' + authUser.email;
+  el('settings-verified').textContent = authUser.emailVerified ? 'მეილი დადასტურებულია ✓' : 'მეილი არ არის დადასტურებული';
+  updateSettingsToggle();
+  hideError(el('settings-error'));
+  el('settings-modal').hidden = false;
+}
+
+function closeSettings() {
+  el('settings-modal').hidden = true;
+}
+
+/* --- Profile event listeners --- */
+
+el('profile-create-btn').addEventListener('click', async () => {
+  const btn = el('profile-create-btn');
+  btn.disabled = true;
+  try {
+    const data = await authApi('/api/profile', { method: 'POST', body: '{}' });
+    myProfile = data.profile;
+    profileLoaded = true;
+    renderProfileEditor();
+    updateNavMenu();
+    updateSettingsToggle();
+    toast('პროფილი შეიქმნა');
+  } catch (e) {
+    showError(el('profile-error'), e.message || 'პროფილის შექმნა ვერ მოხერხდა.');
+  } finally {
+    btn.disabled = authUser ? !authUser.emailVerified : true;
+  }
+});
+
+el('profile-save-btn').addEventListener('click', async () => {
+  const err = el('profile-error');
+  hideError(err);
+  try {
+    const data = await authApi('/api/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({
+        display_name: el('profile-display-name').value,
+        bio: el('profile-bio').value,
+      }),
+    });
+    myProfile = data.profile;
+    renderProfileEditor();
+    updateNavMenu();
+    toast('შენახულია');
+  } catch (e) {
+    showError(err, e.message || 'შენახვა ვერ მოხერხდა.');
+  }
+});
+
+el('profile-copy-link-btn').addEventListener('click', async () => {
+  if (await copyText(profilePageUrl())) toast('პროფილის ბმული დაკოპირდა');
+  else toast('კოპირება ვერ მოხერხდა');
+});
+
+el('profile-settings-hint-btn').addEventListener('click', openSettings);
+
+el('profile-avatar-input').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file || profileAvatarBusy) return;
+  const err = el('profile-error');
+  hideError(err);
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+    showError(err, 'ფოტოს ტიპი დაუშვებელია — PNG, JPEG ან WebP შეიძლება.');
+    return;
+  }
+  profileAvatarBusy = true;
+  try {
+    const avatar = await prepareProfileAvatar(file);
+    await authApi('/api/profile/avatar', {
+      method: 'POST',
+      body: JSON.stringify({ avatar }),
+    });
+    toast('ფოტო აიტვირთა');
+    loadMyProfile();
+  } catch (e2) {
+    showError(err, e2.message || 'ფოტოს ატვირთვა ვერ მოხერხდა.');
+  } finally {
+    profileAvatarBusy = false;
+  }
+});
+
+el('profile-avatar-remove-btn').addEventListener('click', async () => {
+  if (!window.confirm('პროფილის ფოტო მოვხსნა?')) return;
+  try {
+    await authApi('/api/profile/avatar', { method: 'DELETE' });
+    toast('ფოტო მოიხსნა');
+    loadMyProfile();
+  } catch (e) {
+    showError(el('profile-error'), e.message || 'ფოტოს მოხსნა ვერ მოხერხდა.');
+  }
+});
+
+el('profile-add-link-btn').addEventListener('click', () => {
+  if (!myProfile) return;
+  if (myProfile.links.length >= myProfile.linkLimit) {
+    openProfileLimitModal();
+    return;
+  }
+  populateProfileShortSelect();
+  setProfileAddMode('short');
+  el('profile-add-title').value = '';
+  el('profile-add-manual-url').value = '';
+  hideError(el('profile-error'));
+  el('profile-add-box').hidden = false;
+});
+
+el('profile-add-cancel-btn').addEventListener('click', () => {
+  el('profile-add-box').hidden = true;
+});
+
+el('profile-add-tab-short').addEventListener('click', () => setProfileAddMode('short'));
+el('profile-add-tab-manual').addEventListener('click', () => setProfileAddMode('manual'));
+
+el('profile-add-save-btn').addEventListener('click', async () => {
+  const err = el('profile-error');
+  hideError(err);
+  const title = el('profile-add-title').value.trim();
+  if (!title) {
+    showError(err, 'სათაური შეიყვანეთ.');
+    return;
+  }
+  let body;
+  if (profileAddMode === 'short') {
+    const linkId = parseInt(el('profile-add-short-select').value, 10);
+    if (!Number.isFinite(linkId)) {
+      showError(err, 'ბმული აირჩიეთ.');
+      return;
+    }
+    body = { kind: 'short', link_id: linkId, title };
+  } else {
+    let url = el('profile-add-manual-url').value.trim();
+    if (!url) {
+      showError(err, 'მისამართი შეიყვანეთ.');
+      return;
+    }
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = 'https://' + url;
+    body = { kind: 'manual', url, title };
+  }
+  try {
+    await authApi('/api/profile/links', { method: 'POST', body: JSON.stringify(body) });
+    el('profile-add-box').hidden = true;
+    toast('ბმული დაემატა');
+    loadMyProfile();
+  } catch (e) {
+    if (e.data && e.data.error === 'limit_reached') openProfileLimitModal();
+    else showError(err, e.message || 'დამატება ვერ მოხერხდა.');
+  }
+});
+
+el('profile-link-modal-save').addEventListener('click', async () => {
+  if (!profileLinkEditingId) return;
+  const err = el('profile-link-modal-error');
+  hideError(err);
+  const link = myProfile ? myProfile.links.find((l) => l.id === profileLinkEditingId) : null;
+  const body = { title: el('profile-link-modal-title').value };
+  if (link && link.kind === 'manual') {
+    let url = el('profile-link-modal-url').value.trim();
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = 'https://' + url;
+    body.url = url;
+  }
+  try {
+    await authApi('/api/profile/links/' + profileLinkEditingId, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    });
+    el('profile-link-modal').hidden = true;
+    profileLinkEditingId = null;
+    toast('შენახულია');
+    loadMyProfile();
+  } catch (e) {
+    showError(err, e.message || 'შენახვა ვერ მოხერხდა.');
+  }
+});
+el('profile-link-modal-close').addEventListener('click', () => { el('profile-link-modal').hidden = true; });
+el('profile-link-modal').addEventListener('click', (e) => {
+  if (e.target === el('profile-link-modal')) el('profile-link-modal').hidden = true;
+});
+
+el('profile-limit-close').addEventListener('click', () => { el('profile-limit-modal').hidden = true; });
+el('profile-limit-modal').addEventListener('click', (e) => {
+  if (e.target === el('profile-limit-modal')) el('profile-limit-modal').hidden = true;
+});
+el('profile-limit-chat-btn').addEventListener('click', () => {
+  el('profile-limit-modal').hidden = true;
+  const card = el('chat-card');
+  if (card.hidden) {
+    toast('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.');
+    return;
+  }
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  el('user-chat-input').focus();
+});
+
+/* --- Settings panel listeners --- */
+
+el('nav-settings-btn').addEventListener('click', openSettings);
+el('settings-close').addEventListener('click', closeSettings);
+el('settings-modal').addEventListener('click', (e) => {
+  if (e.target === el('settings-modal')) closeSettings();
+});
+el('settings-show-views').addEventListener('change', async (e) => {
+  const err = el('settings-error');
+  hideError(err);
+  const checked = e.target.checked;
+  try {
+    const data = await authApi('/api/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ show_views: checked }),
+    });
+    myProfile = data.profile;
+    renderProfileEditor();
+    toast(checked ? 'ნახვების მრიცხველი ჩართულია' : 'ნახვების მრიცხველი გამორთულია');
+  } catch (e2) {
+    e.target.checked = !checked;
+    showError(err, e2.message || 'შენახვა ვერ მოხერხდა.');
+  }
+});
+
+/* --- Left navigation menu --- */
+
+el('nav-menu-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  const menu = el('nav-menu');
+  menu.hidden = !menu.hidden;
+  el('nav-menu-btn').setAttribute('aria-expanded', String(!menu.hidden));
+});
+document.addEventListener('click', (e) => {
+  const menu = el('nav-menu');
+  if (!menu.hidden && !menu.contains(e.target) && e.target !== el('nav-menu-btn')) {
+    menu.hidden = true;
+    el('nav-menu-btn').setAttribute('aria-expanded', 'false');
+  }
+});
+document.querySelectorAll('.nav-menu-item').forEach((item) => {
+  item.addEventListener('click', () => {
+    el('nav-menu').hidden = true;
+    el('nav-menu-btn').setAttribute('aria-expanded', 'false');
+    const target = document.getElementById(item.dataset.navTarget);
+    if (target && !target.hidden) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
 });
 
 /* ---------------- Start ---------------- */

@@ -11,7 +11,7 @@
 <main class="wrap">
   <header class="header">
     <h1>Mini Link</h1>
-    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა &bull; v7.3</p>
+    <p class="subtitle">ადმინ პანელი &bull; ბმულების მართვა &bull; v8.0</p>
   </header>
 
   <!-- Login (shown when logged out) -->
@@ -220,6 +220,19 @@
       <p id="profile-email" class="link-dest"></p>
       <p class="link-meta"><span id="profile-status"></span> · <span id="profile-created"></span></p>
       <p class="link-meta" id="profile-count"></p>
+      <!-- v8.0: public profile page (/@username) + button limit control -->
+      <div id="profile-page-section">
+        <p class="link-meta" id="profile-page-status"></p>
+        <p id="profile-page-link-row" hidden><a id="profile-page-link" href="#" target="_blank" rel="noopener"></a></p>
+        <div id="profile-limit-row" class="profile-limit-row" hidden>
+          <label class="field">
+            <span>ბმულების ლიმიტი</span>
+            <input id="profile-limit-input" type="number" min="1" max="100" step="1" inputmode="numeric">
+          </label>
+          <button id="profile-limit-save-btn" class="btn small primary" type="button">შენახვა</button>
+        </div>
+        <p id="profile-limit-error" class="error" hidden></p>
+      </div>
       <div id="profile-links" class="links-list"></div>
       <p id="profile-links-empty" class="muted" hidden>ბმულები არ აქვს.</p>
       <div class="result-actions">

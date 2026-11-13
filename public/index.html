@@ -12,8 +12,27 @@
 <main class="wrap">
   <header class="header">
     <h1>Mini Link</h1>
-    <p class="subtitle">მოკლე ბმულები &bull; QR კოდები &bull; სტატისტიკა &bull; v7.3</p>
+    <p class="subtitle">მოკლე ბმულები &bull; QR კოდები &bull; სტატისტიკა &bull; v8.0</p>
   </header>
+
+  <!-- v8.0: logged-in navigation — left menu button + right profile
+       (settings) button. Shown only when logged in. -->
+  <div id="user-topbar" class="user-topbar" hidden>
+    <div class="user-topbar-row">
+      <button id="nav-menu-btn" class="btn small" type="button" aria-haspopup="true" aria-expanded="false">☰ მენიუ</button>
+      <button id="nav-settings-btn" class="btn small nav-avatar-btn" type="button" title="პარამეტრები">
+        <img id="nav-avatar-img" class="nav-avatar-img" alt="" hidden>
+        <span id="nav-avatar-fallback">👤</span>
+      </button>
+    </div>
+    <div id="nav-menu" class="nav-menu" hidden>
+      <button type="button" class="btn nav-menu-item" data-nav-target="shorten-card">🔗 ბმულის შემოკლება</button>
+      <button type="button" class="btn nav-menu-item" data-nav-target="qr-maker-card">📱 QR-ის შექმნა</button>
+      <button type="button" class="btn nav-menu-item" data-nav-target="my-links-card">📋 ჩემი ბმულები</button>
+      <button type="button" class="btn nav-menu-item" data-nav-target="chat-card" id="nav-menu-chat">💬 ჩატი ადმინთან</button>
+      <button type="button" class="btn nav-menu-item" data-nav-target="profile-card" id="nav-menu-profile">🌐 პროფილის შექმნა</button>
+    </div>
+  </div>
 
 
   <!-- Accounts are voluntary: the form below works without any login.
@@ -113,7 +132,7 @@
     <p><button type="button" class="btn" id="auth-close-btn">დახურვა</button></p>
   </section>
 
-  <section class="card">
+  <section class="card" id="shorten-card">
     <h2>ბმულის დამოკლება</h2>
     <p class="muted">გრძელი ბმული ჩასვით და მიიღეთ მოკლე ბმული — უფასოდ, რეგისტრაციის გარეშე.</p>
     <form id="shorten-form">
@@ -215,6 +234,86 @@
     <p id="my-links-error" class="error" hidden></p>
   </section>
 
+  <!-- Profile pages (v8.0): only when logged in; creation needs a
+       verified email (the server enforces the same gate). -->
+  <section id="profile-card" class="card" hidden>
+    <h2>🌐 ჩემი პროფილი</h2>
+    <div id="profile-create-box" hidden>
+      <p class="muted">საჯარო პროფილის გვერდი — ფოტო, ბიო და შენი არჩეული ბმულები ერთ მისამართზე: <strong id="profile-create-url"></strong></p>
+      <p class="muted" id="profile-create-unverified" hidden>პროფილის შესაქმნელად მეილი უნდა იყოს დადასტურებული.</p>
+      <div class="result-actions">
+        <button id="profile-create-btn" class="btn primary" type="button">პროფილის შექმნა</button>
+      </div>
+    </div>
+    <div id="profile-edit-box" hidden>
+      <p class="link-meta" id="profile-views-line"></p>
+      <p><a id="profile-view-link" href="#" target="_blank" rel="noopener"></a></p>
+      <div class="result-actions">
+        <button id="profile-copy-link-btn" class="btn small" type="button">ბმულის კოპირება</button>
+        <button id="profile-settings-hint-btn" class="btn small" type="button">მრიცხველის პარამეტრი</button>
+      </div>
+      <h3>ფოტო</h3>
+      <div class="profile-avatar-row">
+        <img id="profile-avatar-preview" class="profile-avatar-preview" alt="პროფილის ფოტო" hidden>
+        <span id="profile-avatar-initials" class="profile-avatar-initials"></span>
+      </div>
+      <label class="field">
+        <span>ავატარის ატვირთვა <small>(მაქს. 2 MB — ავტომატურად იკუმშება)</small></span>
+        <input id="profile-avatar-input" type="file" accept="image/png,image/jpeg,image/webp">
+      </label>
+      <div class="result-actions">
+        <button id="profile-avatar-remove-btn" class="btn small danger-outline" type="button" hidden>ფოტოს მოხსნა</button>
+      </div>
+      <h3>ინფორმაცია</h3>
+      <label class="field">
+        <span>სახელი</span>
+        <input id="profile-display-name" type="text" maxlength="50" autocomplete="off" placeholder="სახელი პროფილზე">
+      </label>
+      <label class="field">
+        <span>ბიო</span>
+        <textarea id="profile-bio" rows="3" maxlength="160" placeholder="მოკლე აღწერა — მაქს. 160 სიმბოლო"></textarea>
+      </label>
+      <div class="result-actions">
+        <button id="profile-save-btn" class="btn primary" type="button">შენახვა</button>
+      </div>
+      <h3>ბმულები <span id="profile-links-count" class="link-meta"></span></h3>
+      <p class="muted">მხოლოდ ის ბმულები გამოჩნდება, რომლებსაც შენ თვითონ დაამატებ.</p>
+      <div id="profile-links-list" class="links-list"></div>
+      <p id="profile-links-empty" class="muted" hidden>ბმულები ჯერ არ დაგიმატებია.</p>
+      <div class="result-actions">
+        <button id="profile-add-link-btn" class="btn" type="button">➕ ბმულის დამატება</button>
+      </div>
+      <div id="profile-add-box" hidden>
+        <div class="tabs" role="group" aria-label="დამატების ტიპი">
+          <button type="button" class="btn small tab-btn active" id="profile-add-tab-short">🔗 ჩემი ბმული</button>
+          <button type="button" class="btn small tab-btn" id="profile-add-tab-manual">✍️ ხელით</button>
+        </div>
+        <div id="profile-add-short-box">
+          <label class="field">
+            <span>აირჩიე შენი ბმული</span>
+            <select id="profile-add-short-select"></select>
+          </label>
+          <p class="muted" id="profile-add-short-empty" hidden>მოკლე ბმულები ჯერ არ გაქვთ — ჯერ ზემოთ დაამოკლეთ ბმული.</p>
+        </div>
+        <div id="profile-add-manual-box" hidden>
+          <label class="field">
+            <span>მისამართი</span>
+            <input id="profile-add-manual-url" type="url" inputmode="url" autocomplete="off" placeholder="https://instagram.com/username">
+          </label>
+        </div>
+        <label class="field">
+          <span>სათაური</span>
+          <input id="profile-add-title" type="text" maxlength="60" autocomplete="off" placeholder="მაგ. Instagram">
+        </label>
+        <div class="result-actions">
+          <button id="profile-add-save-btn" class="btn primary" type="button">დამატება</button>
+          <button id="profile-add-cancel-btn" class="btn" type="button">გაუქმება</button>
+        </div>
+      </div>
+      <p id="profile-error" class="error" hidden></p>
+    </div>
+  </section>
+
   <!-- Admin chat (v7.0): only for logged-in, email-verified users.
        Unverified and logged-out users never see this section. -->
   <section id="chat-card" class="card" hidden>
@@ -278,6 +377,59 @@
       <div class="result-actions">
         <button id="history-close" class="btn small">დახურვა</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Settings panel (v8.0): all user settings, incl. the profile
+       view-counter toggle. Opened from the top-right profile button. -->
+  <div id="settings-modal" class="modal" hidden>
+    <div class="modal-box settings-box">
+      <h3>⚙️ პარამეტრები</h3>
+      <p class="link-dest" id="settings-account"></p>
+      <p class="link-meta" id="settings-verified"></p>
+      <label class="field settings-toggle">
+        <span>პროფილის ნახვების ჩვენება</span>
+        <input id="settings-show-views" type="checkbox">
+      </label>
+      <p class="muted" id="settings-views-hint">როცა ჩართულია, პროფილის გვერდზე ნახვების რაოდენობა ჩანს.</p>
+      <p class="muted" id="settings-no-profile-hint" hidden>პირველად შექმენი პროფილი — მერე ჩართავ მრიცხველს.</p>
+      <p id="settings-error" class="error" hidden></p>
+      <div class="result-actions">
+        <button id="settings-close" class="btn">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Profile link limit popup (v8.0): shown when the user taps "+"
+       at the limit; the chat button opens the admin chat. -->
+  <div id="profile-limit-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3>ბმულების ლიმიტი ამოიწურა</h3>
+      <p class="muted">პროფილზე მაქსიმუმ <span id="profile-limit-modal-count"></span> ბმული შეიძლება. მეტი რომ გინდა, ადმინს მიწერე — ლიმიტს გაზრდის.</p>
+      <div class="result-actions">
+        <button id="profile-limit-chat-btn" class="btn primary" type="button">💬 ადმინს მიწერა</button>
+        <button id="profile-limit-close" class="btn" type="button">დახურვა</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Profile link edit modal (v8.0) -->
+  <div id="profile-link-modal" class="modal" hidden>
+    <div class="modal-box">
+      <h3>ბმულის რედაქტირება</h3>
+      <label class="field">
+        <span>სათაური</span>
+        <input id="profile-link-modal-title" type="text" maxlength="60" autocomplete="off">
+      </label>
+      <label class="field" id="profile-link-modal-url-field">
+        <span>მისამართი</span>
+        <input id="profile-link-modal-url" type="url" inputmode="url" autocomplete="off" placeholder="https://…">
+      </label>
+      <div class="result-actions">
+        <button id="profile-link-modal-save" class="btn primary" type="button">შენახვა</button>
+        <button id="profile-link-modal-close" class="btn" type="button">დახურვა</button>
+      </div>
+      <p id="profile-link-modal-error" class="error" hidden></p>
     </div>
   </div>
 
