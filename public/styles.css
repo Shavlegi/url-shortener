@@ -356,7 +356,7 @@ input:disabled { opacity: 0.55; }
 .profile-limit-row .field { flex: 1; margin: 0; }
 .profile-limit-row input { max-width: 120px; }
 /* v8.0 UI: nav buttons in the header corners, subtitle in the footer,
-   account row inside the settings panel. */
+   account row inside the settings panel. Reconnected git builds 2026-11-13. */
 .footer { text-align: center; margin: 26px 0 8px; }
 .settings-user { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 0 0 10px; }
 .auth-bar:has(#auth-logged-out[hidden]) { display: none; }
