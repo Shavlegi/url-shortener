@@ -457,72 +457,6 @@ $('qr-bg-input').addEventListener('input', () => {
   renderMakerQr();
 });
 
-/* QR color presets + contrast hint (v8.1). Preset and swap clicks set both
-   color inputs and fire the live re-render above via 'input' events. */
-function qrRelativeLuminance(hex) {
-  const c = hex.replace('#', '');
-  const rgb = [0, 2, 4].map((i) => {
-    const v = parseInt(c.substr(i, 2), 16) / 255;
-    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-  });
-  return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-}
-function syncQrColorUI() {
-  const fgInput = $('qr-fg-input');
-  const bgInput = $('qr-bg-input');
-  if (!fgInput || !bgInput) return;
-  const fg = (fgInput.value || '#000000').toLowerCase();
-  const bg = (bgInput.value || '#ffffff').toLowerCase();
-  const fgHex = $('qr-fg-hex');
-  const bgHex = $('qr-bg-hex');
-  if (fgHex) fgHex.textContent = fg.toUpperCase();
-  if (bgHex) bgHex.textContent = bg.toUpperCase();
-  document.querySelectorAll('.qr-preset').forEach((btn) => {
-    btn.classList.toggle('active',
-      (btn.dataset.fg || '').toLowerCase() === fg && (btn.dataset.bg || '').toLowerCase() === bg);
-  });
-  const hint = $('qr-contrast');
-  if (hint) {
-    const l1 = qrRelativeLuminance(fg);
-    const l2 = qrRelativeLuminance(bg);
-    const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
-    const ratioText = ratio.toFixed(1) + ':1';
-    if (ratio >= 4.5) {
-      hint.textContent = 'კონტრასტი ' + ratioText + ' — შესანიშნავია, QR კარგად დასკანერდება ✓';
-      hint.className = 'qr-contrast ok';
-    } else if (ratio >= 3) {
-      hint.textContent = 'კონტრასტი ' + ratioText + ' — საკმარისია, მაგრამ მუქი QR ღია ფონზე უფრო საიმედოა';
-      hint.className = 'qr-contrast';
-    } else {
-      hint.textContent = '⚠️ კონტრასტი ' + ratioText + ' — ძალიან დაბალია, QR შეიძლება არ დასკანერდეს';
-      hint.className = 'qr-contrast warn';
-    }
-  }
-}
-document.querySelectorAll('.qr-preset').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    $('qr-fg-input').value = btn.dataset.fg;
-    $('qr-bg-input').value = btn.dataset.bg;
-    $('qr-fg-input').dispatchEvent(new Event('input', { bubbles: true }));
-    $('qr-bg-input').dispatchEvent(new Event('input', { bubbles: true }));
-    syncQrColorUI();
-  });
-});
-$('qr-fg-input').addEventListener('input', syncQrColorUI);
-$('qr-bg-input').addEventListener('input', syncQrColorUI);
-const qrSwapBtn = $('qr-swap-btn');
-if (qrSwapBtn) qrSwapBtn.addEventListener('click', () => {
-  const fgInput = $('qr-fg-input');
-  const bgInput = $('qr-bg-input');
-  const tmp = fgInput.value;
-  fgInput.value = bgInput.value;
-  bgInput.value = tmp;
-  fgInput.dispatchEvent(new Event('input', { bubbles: true }));
-  bgInput.dispatchEvent(new Event('input', { bubbles: true }));
-  syncQrColorUI();
-});
-syncQrColorUI();
-
 $('qr-maker-download').addEventListener('click', () => {
   if (!makerCurrent) return;
   const canvas = $('qr-maker-canvas');
@@ -580,7 +514,6 @@ function favCard(fav) {
     $('qr-label-input').value = fav.label;
     $('qr-fg-input').value = fav.fg || '#000000';
     $('qr-bg-input').value = fav.bg || '#ffffff';
-    syncQrColorUI();
     renderMakerQr();
     $('qr-maker-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });

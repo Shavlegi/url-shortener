@@ -171,60 +171,15 @@
       <span>სახელი <small>(რჩეულებში შესანახად — ცარიელი = ავტომატური)</small></span>
       <input id="qr-label-input" type="text" autocomplete="off" maxlength="100" placeholder="მაგ. კაფის Wi-Fi">
     </label>
-    <div class="qr-colors">
-      <span class="qr-colors-title">🎨 ფერები</span>
-      <div class="qr-presets" id="qr-presets" role="group" aria-label="ფერების ნაკრებები">
-        <button type="button" class="qr-preset active" data-fg="#000000" data-bg="#ffffff">
-          <span class="qr-preset-swatch" style="--fg:#000000;--bg:#ffffff"></span>
-          <span class="qr-preset-name">კლასიკა</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#6d28d9" data-bg="#ffffff">
-          <span class="qr-preset-swatch" style="--fg:#6d28d9;--bg:#ffffff"></span>
-          <span class="qr-preset-name">ია</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#1e3a5f" data-bg="#e8f4fd">
-          <span class="qr-preset-swatch" style="--fg:#1e3a5f;--bg:#e8f4fd"></span>
-          <span class="qr-preset-name">ოკეანე</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#1b4332" data-bg="#d8f3dc">
-          <span class="qr-preset-swatch" style="--fg:#1b4332;--bg:#d8f3dc"></span>
-          <span class="qr-preset-name">ტყე</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#1e293b" data-bg="#f1f5f9">
-          <span class="qr-preset-swatch" style="--fg:#1e293b;--bg:#f1f5f9"></span>
-          <span class="qr-preset-name">ღამე</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#7f1d2d" data-bg="#fff1f2">
-          <span class="qr-preset-swatch" style="--fg:#7f1d2d;--bg:#fff1f2"></span>
-          <span class="qr-preset-name">ბორდო</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#0c4a6e" data-bg="#f0f9ff">
-          <span class="qr-preset-swatch" style="--fg:#0c4a6e;--bg:#f0f9ff"></span>
-          <span class="qr-preset-name">ცისფერი</span>
-        </button>
-        <button type="button" class="qr-preset" data-fg="#713f12" data-bg="#fffbeb">
-          <span class="qr-preset-swatch" style="--fg:#713f12;--bg:#fffbeb"></span>
-          <span class="qr-preset-name">თაფლი</span>
-        </button>
-      </div>
-      <div class="qr-custom-row">
-        <div class="qr-custom">
-          <input id="qr-fg-input" class="qr-color-input" type="color" value="#000000" aria-label="QR ფერი">
-          <div class="qr-custom-meta">
-            <span class="qr-custom-name">QR ფერი</span>
-            <span class="qr-hex" id="qr-fg-hex">#000000</span>
-          </div>
-        </div>
-        <button type="button" class="qr-swap-btn" id="qr-swap-btn" aria-label="ფერების გაცვლა">⇄</button>
-        <div class="qr-custom">
-          <input id="qr-bg-input" class="qr-color-input" type="color" value="#ffffff" aria-label="ფონი">
-          <div class="qr-custom-meta">
-            <span class="qr-custom-name">ფონი</span>
-            <span class="qr-hex" id="qr-bg-hex">#FFFFFF</span>
-          </div>
-        </div>
-      </div>
-      <p class="qr-contrast" id="qr-contrast" role="status"></p>
+    <div class="row">
+      <label class="field">
+        <span>QR ფერი</span>
+        <input id="qr-fg-input" type="color" value="#000000">
+      </label>
+      <label class="field">
+        <span>ფონი</span>
+        <input id="qr-bg-input" type="color" value="#ffffff">
+      </label>
     </div>
     <label class="field">
       <span>ლოგო <small>(არასავალდებულო — სურათი ცენტრში)</small></span>
