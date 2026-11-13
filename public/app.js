@@ -1085,6 +1085,19 @@ $('visitors-clear-btn').addEventListener('click', async () => {
   } catch (e) { toast(e.message || 'შეცდომა'); }
 });
 
+const CLEANUP_BTNS = { 'visitors-clean-7-btn': 7, 'visitors-clean-30-btn': 30, 'visitors-clean-90-btn': 90 };
+for (const [id, days] of Object.entries(CLEANUP_BTNS)) {
+  $(id).addEventListener('click', async () => {
+    if (!window.confirm('წაიშლება ' + days + ' დღეზე ძველი ყველა ჩანაწერი (სტუმრები, მოვლენები, სტატისტიკა). გაგრძელება?')) return;
+    try {
+      const data = await api('/api/admin/visitors?olderThanDays=' + days, { method: 'DELETE' });
+      const d = data.deleted || {};
+      toast('წაიშალა: ' + (d.visitors || 0) + ' სტუმარი, ' + (d.events || 0) + ' მოვლენა');
+      loadVisitors();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+}
+
 /* ---------------- IP exclusions (v10.1) ---------------- */
 // Admin-managed: visits from these IPs are never recorded.
 let exclusions = [];
@@ -1509,7 +1522,7 @@ function renderVisitHours(hours) {
   }
 }
 
-const HOURS_BTNS = { 'hours-today': 'today', 'hours-7d': '7d', 'hours-30d': '30d' };
+const HOURS_BTNS = { 'hours-today': 'today', 'hours-7d': '7d', 'hours-30d': '30d', 'hours-90d': '90d' };
 for (const [id, period] of Object.entries(HOURS_BTNS)) {
   $(id).addEventListener('click', () => {
     hoursPeriod = period;

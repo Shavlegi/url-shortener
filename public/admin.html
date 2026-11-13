@@ -147,7 +147,7 @@
 
     <section class="card" id="section-visitors" hidden>
       <h2>სტუმრები</h2>
-      <p class="muted">ვიზიტორების IP მისამართები — მხოლოდ ადმინს ჩანს. 30 დღეზე ძველი ჩანაწერები ავტომატურად იშლება; ღილაკით მთლიანი სიის გასუფთავებაც შეიძლება.</p>
+      <p class="muted">ვიზიტორების IP მისამართები — მხოლოდ ადმინს ჩანს. IP, რომელიც 90 დღე არ გამოჩნდება, ავტომატურად იშლება; ღილაკებით ძველის ან მთლიანი სიის გასუფთავებაც შეიძლება.</p>
       <p class="link-meta" id="visitors-totals">—</p>
       <div class="row">
         <label class="field">
@@ -168,6 +168,9 @@
       </div>
       <div class="result-actions">
         <button id="visitors-clear-btn" class="btn danger-outline" type="button">სიის გასუფთავება</button>
+        <button id="visitors-clean-7-btn" class="btn small" type="button">7 დღეზე ძველი</button>
+        <button id="visitors-clean-30-btn" class="btn small" type="button">30 დღეზე ძველი</button>
+        <button id="visitors-clean-90-btn" class="btn small" type="button">90 დღეზე ძველი</button>
       </div>
       <p id="visitors-empty" class="muted" hidden>სტუმრები ჯერ არ არიან.</p>
       <div id="visitors-list" class="links-list"></div>
@@ -271,6 +274,7 @@
         <button id="hours-today" class="btn small period-btn active" type="button">დღეს</button>
         <button id="hours-7d" class="btn small period-btn" type="button">7 დღე</button>
         <button id="hours-30d" class="btn small period-btn" type="button">30 დღე</button>
+        <button id="hours-90d" class="btn small period-btn" type="button">90 დღე</button>
       </div>
       <p id="hours-empty" class="muted" hidden>ამ პერიოდში ვიზიტები არ ყოფილა.</p>
       <div id="hours-list" class="links-list"></div>

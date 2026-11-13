@@ -61,7 +61,7 @@ const CONFIG = {
   redirectMaxPerMin: 120,
   maxLinksList: 200,
   maxVisitorsList: 1000,
-  visitorRetentionMs: 30 * 24 * 3600 * 1000, // v10.0: visitor IPs auto-delete after 30 days
+  visitorRetentionMs: 90 * 24 * 3600 * 1000, // v10.0: visitor IPs auto-delete after 90 days without a visit (v10.5: was 30)
   beaconMaxPerMin: 30, // v10.3: screen-size beacon, per IP
   beaconMaxPerHour: 300, // v10.3: screen-size beacon, per IP
   eventMaxPerMin: 60, // v10.4: behavior events, per IP
@@ -2499,7 +2499,7 @@ function tbilisiDayHour(now) {
   const shifted = now + 4 * 3600 * 1000;
   const day = new Date(shifted).toISOString().slice(0, 10);
   const hour = new Date(shifted).getUTCHours();
-  const cutoffDay = new Date(shifted - 30 * 86400000).toISOString().slice(0, 10);
+  const cutoffDay = new Date(shifted - CONFIG.visitorRetentionMs).toISOString().slice(0, 10);
   return { day, hour, cutoffDay };
 }
 
@@ -2525,7 +2525,7 @@ function primaryLanguage(request) {
   return tag ? tag.slice(0, 10) : null;
 }
 
-/* v10.0: visitor IP log (admin-only, 30-day retention). The owner asked
+/* v10.0: visitor IP log (admin-only, 90-day retention, v10.5 — was 30). The owner asked
    for this explicitly (2026-11-13): every non-bot visit to a document
    page, a profile page, or a short-link redirect upserts one row per IP
    (visit count + first/last seen + last path). Raw IPs live ONLY in the
@@ -4186,14 +4186,35 @@ async function handleApi(request, env, url) {
   if (path === '/api/admin/visitors' && method === 'DELETE') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const ip = (url.searchParams.get('ip') || '').trim();
+    const olderThanRaw = url.searchParams.get('olderThanDays');
+    if (ip && olderThanRaw !== null) return error('მიუთითეთ ან IP, ან ვადა.', 400);
     if (ip) {
       if (ip.length > 45) return error('არასწორი IP.', 400);
       const res = await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
       await env.DB.prepare('DELETE FROM visitor_users WHERE ip = ?').bind(ip).run();
+      await env.DB.prepare('DELETE FROM visit_events WHERE ip = ?').bind(ip).run();
       return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
+    }
+    // v10.5: manual cleanup by age — deletes everything older than N days
+    // (inactivity-based, same rule as automatic pruning).
+    if (olderThanRaw !== null) {
+      const days = Number(olderThanRaw);
+      if (!Number.isInteger(days) || days < 1 || days > 365) return error('არასწორი ვადა (1–365 დღე).', 400);
+      const cutoff = Date.now() - days * 86400000;
+      const cutoffDay = tbilisiDayHour(Date.now() - (days - 1) * 86400000).day;
+      const r1 = await env.DB.prepare('DELETE FROM visitors WHERE last_seen < ?').bind(cutoff).run();
+      const r2 = await env.DB.prepare('DELETE FROM visitor_users WHERE last_seen < ?').bind(cutoff).run();
+      const r3 = await env.DB.prepare('DELETE FROM visit_events WHERE created_at < ?').bind(cutoff).run();
+      const r4 = await env.DB.prepare('DELETE FROM visit_hours WHERE day < ?').bind(cutoffDay).run();
+      const r5 = await env.DB.prepare('DELETE FROM path_stats WHERE last_seen < ?').bind(cutoff).run();
+      const changes = (r) => (r.meta ? r.meta.changes : 0);
+      return json({ ok: true, deleted: { visitors: changes(r1), visitorUsers: changes(r2), events: changes(r3), hours: changes(r4), paths: changes(r5) } });
     }
     const res = await env.DB.prepare('DELETE FROM visitors').run();
     await env.DB.prepare('DELETE FROM visitor_users').run();
+    await env.DB.prepare('DELETE FROM visit_events').run();
+    await env.DB.prepare('DELETE FROM visit_hours').run();
+    await env.DB.prepare('DELETE FROM path_stats').run();
     return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
   }
 
@@ -4204,13 +4225,14 @@ async function handleApi(request, env, url) {
     await env.DB.prepare('DELETE FROM visit_hours WHERE day < ?').bind(cutoffDay).run();
     let fromDay = day;
     if (period === '7d') fromDay = tbilisiDayHour(Date.now() - 6 * 86400000).day;
-    else if (period === '30d') fromDay = cutoffDay;
+    else if (period === '30d') fromDay = tbilisiDayHour(Date.now() - 29 * 86400000).day;
+    else if (period === '90d') fromDay = cutoffDay;
     const rows = await env.DB.prepare(
       'SELECT hour, SUM(visits) AS v FROM visit_hours WHERE day >= ? GROUP BY hour ORDER BY hour ASC',
     ).bind(fromDay).all();
     const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, visits: 0 }));
     for (const r of (rows.results || [])) hours[r.hour].visits = r.v;
-    return json({ hours, period: period === '7d' || period === '30d' ? period : 'today' });
+    return json({ hours, period: period === '7d' || period === '30d' || period === '90d' ? period : 'today' });
   }
   // --- v10.3: popular pages (admin only) -------------------------------
   if (path === '/api/admin/path-stats' && method === 'GET') {
