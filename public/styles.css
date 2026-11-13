@@ -365,6 +365,29 @@ input:disabled { opacity: 0.55; }
    top of the page. Glass background so scrolled content stays readable
    underneath; z-index below modals (10) and toast (20). */
 .site-header { position: sticky; top: 0; z-index: 5; margin-top: 0; background: rgba(10, 10, 10, 0.6); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); border-bottom: 1px solid var(--border); }
+/* QR color section (v8.1): preset pairs + custom swatches + contrast hint. */
+.qr-colors { margin-bottom: 12px; }
+.qr-colors-title { display: block; font-weight: 600; margin-bottom: 8px; font-size: 0.95rem; }
+.qr-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.qr-preset { background: none; border: none; padding: 0; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 5px; font: inherit; color: var(--muted); }
+.qr-preset-swatch { width: 46px; height: 46px; border-radius: 50%; background: linear-gradient(135deg, var(--fg) 0 50%, var(--bg) 50% 100%); border: 2px solid var(--border-strong); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); position: relative; }
+.qr-preset.active .qr-preset-swatch { border-color: var(--primary-2); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--primary-2), var(--glow); }
+.qr-preset.active .qr-preset-swatch::after { content: "✓"; position: absolute; right: -3px; bottom: -3px; width: 18px; height: 18px; border-radius: 50%; background: var(--primary-2); color: #fff; font-size: 0.7rem; font-weight: 800; display: flex; align-items: center; justify-content: center; border: 2px solid var(--bg); }
+.qr-preset.active .qr-preset-name { color: var(--accent); font-weight: 700; }
+.qr-preset-name { font-size: 0.78rem; }
+.qr-custom-row { display: flex; align-items: center; gap: 12px; }
+.qr-custom { flex: 1; display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; min-width: 0; }
+.qr-color-input { -webkit-appearance: none; appearance: none; width: 46px; height: 46px; border: 2px solid var(--border-strong); border-radius: 50%; padding: 0; background: none; cursor: pointer; flex: none; }
+.qr-color-input::-webkit-color-swatch-wrapper { padding: 2px; }
+.qr-color-input::-webkit-color-swatch { border: none; border-radius: 50%; }
+.qr-color-input::-moz-color-swatch { border: none; border-radius: 50%; }
+.qr-custom-meta { display: flex; flex-direction: column; min-width: 0; }
+.qr-custom-name { font-weight: 600; font-size: 0.9rem; }
+.qr-hex { font-family: ui-monospace, monospace; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; }
+.qr-swap-btn { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface); color: var(--accent); font-size: 1.15rem; cursor: pointer; }
+.qr-contrast { margin: 10px 0 0; font-size: 0.85rem; }
+.qr-contrast.ok { color: var(--success); }
+.qr-contrast.warn { color: var(--warning-text); }
 
 /* Motion: micro-interactions only; honor reduced-motion preferences. */
 @media (prefers-reduced-motion: reduce) {
