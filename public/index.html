@@ -172,22 +172,18 @@
       <input id="qr-label-input" type="text" autocomplete="off" maxlength="100" placeholder="მაგ. კაფის Wi-Fi">
     </label>
     <div class="qr-color-btns">
-      <button type="button" class="qr-color-btn" id="qr-fg-btn">
-        <span class="qr-color-btn-swatch" id="qr-fg-swatch" style="background:#000000"></span>
+      <label class="qr-color-btn">
+        <input id="qr-fg-input" type="color" value="#000000">
         <span class="qr-color-btn-label">QR ფერი</span>
-      </button>
-      <button type="button" class="qr-color-btn" id="qr-bg-btn">
-        <span class="qr-color-btn-swatch" id="qr-bg-swatch" style="background:#ffffff"></span>
+      </label>
+      <label class="qr-color-btn">
+        <input id="qr-bg-input" type="color" value="#ffffff">
         <span class="qr-color-btn-label">ფონი</span>
-      </button>
+      </label>
       <button type="button" class="qr-color-btn" id="qr-custom-btn">
         <span class="qr-color-btn-icon">🎨</span>
         <span class="qr-color-btn-label">მორგებული</span>
       </button>
-    </div>
-    <div hidden>
-      <input id="qr-fg-input" type="color" value="#000000">
-      <input id="qr-bg-input" type="color" value="#ffffff">
     </div>
     <label class="field">
       <span>ლოგო <small>(არასავალდებულო — სურათი ცენტრში)</small></span>

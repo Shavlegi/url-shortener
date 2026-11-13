@@ -548,25 +548,12 @@ $('qr-color-set').addEventListener('click', () => {
     qrColorModalClose();
   }
 });
-/* Button swatches mirror the current colors. */
-function syncQrBtnSwatches() {
-  const fgSwatch = $('qr-fg-swatch');
-  const bgSwatch = $('qr-bg-swatch');
-  if (fgSwatch) fgSwatch.style.background = $('qr-fg-input').value;
-  if (bgSwatch) bgSwatch.style.background = $('qr-bg-input').value;
-}
-$('qr-fg-input').addEventListener('input', syncQrBtnSwatches);
-$('qr-bg-input').addEventListener('input', syncQrBtnSwatches);
-$('qr-fg-btn').addEventListener('click', () => {
-  qrColorModalOpen('qr-fg-input', 'QR ფერი', false);
-});
-$('qr-bg-btn').addEventListener('click', () => {
-  qrColorModalOpen('qr-bg-input', 'ფონი', false);
-});
+/* Only "მორგებული" opens the custom modal (sequential: QR color, then
+   background). The QR color / background buttons are native color inputs
+   and open the phone picker's suggestions grid. */
 $('qr-custom-btn').addEventListener('click', () => {
   qrColorModalOpen('qr-fg-input', 'QR ფერი', true);
 });
-syncQrBtnSwatches();
 
 $('qr-maker-download').addEventListener('click', () => {
   if (!makerCurrent) return;
@@ -625,7 +612,6 @@ function favCard(fav) {
     $('qr-label-input').value = fav.label;
     $('qr-fg-input').value = fav.fg || '#000000';
     $('qr-bg-input').value = fav.bg || '#ffffff';
-    syncQrBtnSwatches();
     renderMakerQr();
     $('qr-maker-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
