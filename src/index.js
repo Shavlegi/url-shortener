@@ -1003,6 +1003,40 @@ async function ensureV10Schema(env) {
   }
 }
 
+let v11SchemaChecked = false;
+
+async function ensureV11Schema(env) {
+  if (v11SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v11_ip_exclusions'",
+    ).first();
+    if (flag && flag.value === '11') {
+      v11SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS ip_exclusions (' +
+      'ip TEXT PRIMARY KEY, ' +
+      'created_at INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v11_ip_exclusions', '11')",
+    ).run();
+    v11SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v11 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — the limiter itself   */
 /* never stores raw IPs; visitor IPs live only in the v10 visitors    */
@@ -2252,6 +2286,18 @@ function isBot(userAgent) {
   return BOT_UA.some((frag) => ua.includes(frag));
 }
 
+// v10.1: loose IP validation for the admin-managed exclusion list.
+// IPv4 = four decimal octets (each <= 255); IPv6 = hex groups + colons
+// (compressed forms allowed). Anything else is rejected. The value is
+// only ever used as a bind parameter and shown via textContent.
+function isValidIp(ip) {
+  if (typeof ip !== 'string' || ip.length === 0 || ip.length > 45) return false;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+    return ip.split('.').every((o) => Number(o) <= 255);
+  }
+  return /^[0-9A-Fa-f:]+$/.test(ip) && ip.includes(':') && !ip.includes(':::');
+}
+
 /* v10.0: visitor IP log (admin-only, 30-day retention). The owner asked
    for this explicitly (2026-11-13): every non-bot visit to a document
    page, a profile page, or a short-link redirect upserts one row per IP
@@ -2269,6 +2315,12 @@ async function recordVisit(env, request, path) {
     const now = Date.now();
     const cleanPath = String(path || '/').slice(0, 200);
     await ensureV10Schema(env);
+    await ensureV11Schema(env);
+    // v10.1: admin-excluded IPs are never recorded.
+    const excluded = await env.DB.prepare(
+      'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
+    ).bind(ip).first();
+    if (excluded) return;
     await env.DB.batch([
       env.DB.prepare(
         'INSERT INTO visitors (ip, visits, first_seen, last_seen, last_path) VALUES (?, 1, ?, ?, ?) ' +
@@ -2414,6 +2466,8 @@ async function handleApi(request, env, url) {
   await ensureV9Schema(env);
   // v10.0 schema (visitors) — same lazy pattern, see ensureV10Schema.
   await ensureV10Schema(env);
+  // v10.1 schema (ip_exclusions) — same lazy pattern, see ensureV11Schema.
+  await ensureV11Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -3722,6 +3776,37 @@ async function handleApi(request, env, url) {
       return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
     }
     const res = await env.DB.prepare('DELETE FROM visitors').run();
+    return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
+  }
+
+  // --- v10.1: excluded IPs (admin only) --------------------------------
+  if (path === '/api/admin/ip-exclusions' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      'SELECT ip, created_at FROM ip_exclusions ORDER BY created_at DESC',
+    ).all();
+    return json({
+      exclusions: (rows.results || []).map((r) => ({ ip: r.ip, createdAt: r.created_at })),
+    });
+  }
+  if (path === '/api/admin/ip-exclusions' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const ip = typeof parsed.body.ip === 'string' ? parsed.body.ip.trim() : '';
+    if (!isValidIp(ip)) return error('არასწორი IP მისამართი.', 400);
+    const res = await env.DB.prepare(
+      'INSERT OR IGNORE INTO ip_exclusions (ip, created_at) VALUES (?, ?)',
+    ).bind(ip, Date.now()).run();
+    const added = res.meta ? res.meta.changes > 0 : false;
+    // Adding an exclusion also removes the IP from the visitors list.
+    await env.DB.prepare('DELETE FROM visitors WHERE ip = ?').bind(ip).run();
+    return json({ ok: true, added });
+  }
+  if (path === '/api/admin/ip-exclusions' && method === 'DELETE') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const ip = (url.searchParams.get('ip') || '').trim();
+    if (!ip) return error('IP მისამართი საჭიროა.', 400);
+    const res = await env.DB.prepare('DELETE FROM ip_exclusions WHERE ip = ?').bind(ip).run();
     return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
   }
 

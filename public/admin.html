@@ -172,6 +172,18 @@
       <p id="visitors-empty" class="muted" hidden>სტუმრები ჯერ არ არიან.</p>
       <div id="visitors-list" class="links-list"></div>
       <p id="visitors-error" class="error" hidden></p>
+      <h3>გამონაკლისი IP-ები</h3>
+      <p class="muted">ამ სიაში დამატებული IP-ებიდან ვიზიტები არ ჩაიწერება. დამატებისას IP სტუმრების სიიდანაც იშლება.</p>
+      <label class="field">
+        <span class="sr-only">IP მისამართი</span>
+        <input id="exclusion-ip-input" type="text" autocomplete="off" placeholder="მაგ. 1.2.3.4" maxlength="45">
+      </label>
+      <div class="result-actions">
+        <button id="exclusion-add-btn" class="btn primary" type="button">გამონაკლისში დამატება</button>
+      </div>
+      <p id="exclusions-empty" class="muted" hidden>გამონაკლისები არ არის.</p>
+      <div id="exclusions-list" class="links-list"></div>
+      <p id="exclusions-error" class="error" hidden></p>
     </section>
 
     <section class="card" id="section-chat" hidden>

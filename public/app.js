@@ -92,7 +92,7 @@ function setAuthed(yes) {
   loginView.hidden = yes;
   appView.hidden = !yes;
   if (yes) {
-    loadLinks(); loadUsers(); loadQrFavoritesAdmin(); loadVisitors();
+    loadLinks(); loadUsers(); loadQrFavoritesAdmin(); loadVisitors(); loadExclusions();
     if (currentTab === 'chat') { loadChatUsers(); startChatPolling(); }
   } else {
     stopChatPolling();
@@ -154,7 +154,7 @@ function showTab(name) {
     loadRecentClicks();
   }
   if (name === 'qr') loadQrFavoritesAdmin();
-  if (name === 'visitors') loadVisitors();
+  if (name === 'visitors') { loadVisitors(); loadExclusions(); }
   if (name === 'chat') {
     // Only load when logged in (appView starts hidden; setAuthed(true)
     // starts the chat load when the chat tab is already selected).
@@ -875,6 +875,28 @@ function visitorCard(v) {
 
   const actions = document.createElement('div');
   actions.className = 'result-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn small';
+  copyBtn.type = 'button';
+  copyBtn.textContent = 'კოპირება';
+  copyBtn.addEventListener('click', async () => {
+    const ok = await copyText(v.ip);
+    toast(ok ? 'IP დაკოპირდა' : 'კოპირება ვერ მოხერხდა');
+  });
+  actions.appendChild(copyBtn);
+  const excludeBtn = document.createElement('button');
+  excludeBtn.className = 'btn small';
+  excludeBtn.type = 'button';
+  excludeBtn.textContent = '🚫 გამონაკლისში';
+  excludeBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/ip-exclusions', { method: 'POST', body: JSON.stringify({ ip: v.ip }) });
+      toast('IP გამონაკლისებში დაემატა');
+      loadVisitors();
+      loadExclusions();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(excludeBtn);
   const delBtn = document.createElement('button');
   delBtn.className = 'btn small danger-outline';
   delBtn.type = 'button';
@@ -903,6 +925,88 @@ $('visitors-clear-btn').addEventListener('click', async () => {
   try {
     const data = await api('/api/admin/visitors', { method: 'DELETE' });
     toast('გასუფთავდა: ' + (data.deleted || 0) + ' ჩანაწერი');
+    loadVisitors();
+  } catch (e) { toast(e.message || 'შეცდომა'); }
+});
+
+/* ---------------- IP exclusions (v10.1) ---------------- */
+// Admin-managed: visits from these IPs are never recorded.
+let exclusions = [];
+
+async function loadExclusions() {
+  const err = $('exclusions-error');
+  hideError(err);
+  try {
+    const data = await api('/api/admin/ip-exclusions');
+    exclusions = data.exclusions || [];
+    renderExclusions();
+  } catch (e) {
+    showError(err, e.message || 'გამონაკლისების ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function renderExclusions() {
+  const list = $('exclusions-list');
+  list.innerHTML = '';
+  $('exclusions-empty').hidden = exclusions.length !== 0;
+  for (const ex of exclusions) {
+    list.appendChild(exclusionCard(ex));
+  }
+}
+
+function exclusionCard(ex) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const ip = document.createElement('span');
+  ip.className = 'link-alias';
+  ip.textContent = ex.ip;
+  top.appendChild(ip);
+  card.appendChild(top);
+
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = 'დამატებულია: ' + fmtDate(ex.createdAt);
+  card.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'result-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn small';
+  copyBtn.type = 'button';
+  copyBtn.textContent = 'კოპირება';
+  copyBtn.addEventListener('click', async () => {
+    const ok = await copyText(ex.ip);
+    toast(ok ? 'IP დაკოპირდა' : 'კოპირება ვერ მოხერხდა');
+  });
+  actions.appendChild(copyBtn);
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'btn small danger-outline';
+  removeBtn.type = 'button';
+  removeBtn.textContent = 'მოხსნა';
+  removeBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/ip-exclusions?ip=' + encodeURIComponent(ex.ip), { method: 'DELETE' });
+      toast('გამონაკლისი მოიხსნა');
+      loadExclusions();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(removeBtn);
+  card.appendChild(actions);
+  return card;
+}
+
+$('exclusion-add-btn').addEventListener('click', async () => {
+  const input = $('exclusion-ip-input');
+  const ip = input.value.trim();
+  if (!ip) { toast('IP მისამართი ჩაწერეთ'); return; }
+  try {
+    const data = await api('/api/admin/ip-exclusions', { method: 'POST', body: JSON.stringify({ ip }) });
+    toast(data.added ? 'IP გამონაკლისებში დაემატა' : 'ეს IP უკვე გამონაკლისებშია');
+    input.value = '';
+    loadExclusions();
     loadVisitors();
   } catch (e) { toast(e.message || 'შეცდომა'); }
 });
