@@ -70,7 +70,6 @@ function hideAuthCard() {
 function setLoggedIn(user) {
   authUser = user;
   el('auth-logged-out').hidden = true;
-  el('auth-logged-in').hidden = false;
   el('user-name').textContent = user ? user.username : '';
   el('my-links-card').hidden = false;
   hideAuthCard();
@@ -95,7 +94,6 @@ function setLoggedOut() {
   authUser = null;
   authMyLinks = [];
   el('auth-logged-out').hidden = false;
-  el('auth-logged-in').hidden = true;
   el('my-links-card').hidden = true;
   el('chat-card').hidden = true;
   stopUserChat();
