@@ -922,6 +922,91 @@ function visitorCard(v) {
     card.appendChild(pathEl);
   }
 
+  if (v.note) {
+    const noteEl = document.createElement('p');
+    noteEl.className = 'link-meta';
+    noteEl.textContent = '📝 ' + v.note;
+    card.appendChild(noteEl);
+  }
+
+  const noteEditor = document.createElement('div');
+  noteEditor.hidden = true;
+  const noteInput = document.createElement('textarea');
+  noteInput.rows = 3;
+  noteInput.maxLength = 500;
+  noteInput.value = v.note || '';
+  noteInput.placeholder = 'შენიშვნა ამ IP-ზე…';
+  noteInput.style.cssText = 'margin:8px 0;';
+  noteEditor.appendChild(noteInput);
+  const noteActions = document.createElement('div');
+  noteActions.className = 'result-actions';
+  const noteSave = document.createElement('button');
+  noteSave.className = 'btn small primary';
+  noteSave.type = 'button';
+  noteSave.textContent = 'შენახვა';
+  noteSave.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/visitors', { method: 'PATCH', body: JSON.stringify({ ip: v.ip, note: noteInput.value }) });
+      toast('შენიშვნა შეინახა');
+      loadVisitors();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  noteActions.appendChild(noteSave);
+  const noteCancel = document.createElement('button');
+  noteCancel.className = 'btn small';
+  noteCancel.type = 'button';
+  noteCancel.textContent = 'გაუქმება';
+  noteCancel.addEventListener('click', () => {
+    noteInput.value = v.note || '';
+    noteEditor.hidden = true;
+  });
+  noteActions.appendChild(noteCancel);
+  noteEditor.appendChild(noteActions);
+
+  const eventsWrap = document.createElement('div');
+  eventsWrap.hidden = true;
+  const eventsList = document.createElement('div');
+  eventsList.className = 'links-list';
+  eventsWrap.appendChild(eventsList);
+
+  async function loadEvents() {
+    eventsList.innerHTML = '';
+    const loading = document.createElement('p');
+    loading.className = 'link-meta';
+    loading.textContent = 'იტვირთება…';
+    eventsList.appendChild(loading);
+    try {
+      const data = await api('/api/admin/visitor-events?ip=' + encodeURIComponent(v.ip));
+      eventsList.innerHTML = '';
+      const events = data.events || [];
+      if (events.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'link-meta';
+        empty.textContent = 'მონაცემები არ არის.';
+        eventsList.appendChild(empty);
+        return;
+      }
+      for (const ev of events) {
+        const row = document.createElement('p');
+        row.className = 'link-meta';
+        const sessionShort = String(ev.session || '').slice(0, 8);
+        let desc = '';
+        if (ev.type === 'pageview') desc = 'გახსნა: ' + (ev.path || '/');
+        else if (ev.type === 'click') desc = 'დააჭირა: ' + (ev.label || '');
+        else if (ev.type === 'time') desc = 'გვერდზე: ' + (ev.seconds || 0) + ' წამი' + (ev.scroll !== null && ev.scroll !== undefined ? ' · სქროლი ' + ev.scroll + '%' : '');
+        else desc = ev.type;
+        row.textContent = '[' + sessionShort + '] ' + fmtDate(ev.createdAt) + ' — ' + desc;
+        eventsList.appendChild(row);
+      }
+    } catch (e) {
+      eventsList.innerHTML = '';
+      const err = document.createElement('p');
+      err.className = 'error';
+      err.textContent = e.message || 'შეცდომა';
+      eventsList.appendChild(err);
+    }
+  }
+
   const actions = document.createElement('div');
   actions.className = 'result-actions';
   const copyBtn = document.createElement('button');
@@ -959,7 +1044,29 @@ function visitorCard(v) {
     } catch (e) { toast(e.message || 'შეცდომა'); }
   });
   actions.appendChild(delBtn);
+  const noteBtn = document.createElement('button');
+  noteBtn.className = 'btn small';
+  noteBtn.type = 'button';
+  noteBtn.textContent = '📝 შენიშვნა';
+  noteBtn.addEventListener('click', () => {
+    eventsWrap.hidden = true;
+    noteEditor.hidden = !noteEditor.hidden;
+  });
+  actions.appendChild(noteBtn);
+  const trackBtn = document.createElement('button');
+  trackBtn.className = 'btn small';
+  trackBtn.type = 'button';
+  trackBtn.textContent = '👁 თვალთვალი';
+  trackBtn.addEventListener('click', () => {
+    noteEditor.hidden = true;
+    const willShow = eventsWrap.hidden;
+    eventsWrap.hidden = !willShow;
+    if (willShow) loadEvents();
+  });
+  actions.appendChild(trackBtn);
   card.appendChild(actions);
+  card.appendChild(noteEditor);
+  card.appendChild(eventsWrap);
   return card;
 }
 

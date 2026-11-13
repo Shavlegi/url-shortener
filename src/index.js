@@ -64,6 +64,10 @@ const CONFIG = {
   visitorRetentionMs: 30 * 24 * 3600 * 1000, // v10.0: visitor IPs auto-delete after 30 days
   beaconMaxPerMin: 30, // v10.3: screen-size beacon, per IP
   beaconMaxPerHour: 300, // v10.3: screen-size beacon, per IP
+  eventMaxPerMin: 60, // v10.4: behavior events, per IP
+  eventMaxPerHour: 600, // v10.4: behavior events, per IP
+  maxVisitEvents: 5000, // v10.4: visit_events cap (newest kept)
+  visitorNoteMaxChars: 500, // v10.4: admin note per visitor IP
   maxImportLinks: 500,
   // v2: user accounts (voluntary — anonymous shortening stays as-is).
   usernameMin: 3,
@@ -1142,6 +1146,54 @@ async function ensureV13Schema(env) {
   } catch (e) {
     // Flag stays unset — the next request retries the migration.
     console.error('v13 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
+let v14SchemaChecked = false;
+
+async function ensureV14Schema(env) {
+  if (v14SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v14_tracking_notes'",
+    ).first();
+    if (flag && flag.value === '14') {
+      v14SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await addColumnIfMissing(env, 'ALTER TABLE visitors ADD COLUMN note TEXT');
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS visit_events (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'ip TEXT NOT NULL, ' +
+      'session TEXT NOT NULL, ' +
+      'type TEXT NOT NULL, ' +
+      'path TEXT, ' +
+      'label TEXT, ' +
+      'seconds INTEGER, ' +
+      'scroll INTEGER, ' +
+      'created_at INTEGER NOT NULL)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_visit_events_ip ON visit_events(ip, created_at DESC)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_visit_events_created ON visit_events(created_at)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v14_tracking_notes', '14')",
+    ).run();
+    v14SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v14 schema migration failed:', e && e.message ? e.message : e);
   }
 }
 
@@ -2710,6 +2762,8 @@ async function handleApi(request, env, url) {
   await ensureV12Schema(env);
   // v10.3 schema (visitors enrichment + visit_hours/path_stats/screen_stats) — same lazy pattern, see ensureV13Schema.
   await ensureV13Schema(env);
+  // v10.4 schema (visitors note + visit_events) — same lazy pattern, see ensureV14Schema.
+  await ensureV14Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -3100,6 +3154,59 @@ async function handleApi(request, env, url) {
   // The client ignores failures — the QR still renders. Privacy note:
   // unlike v5, the generated QR content IS sent to the server now; no IP
   // is stored (rate limiting uses only the daily IP hash).
+  // --- v10.4: behavior events (public ingest, admin-only viewing) ------
+  // Sent by public.js: page opens, clicks (labels only, never input
+  // values), time on page + max scroll depth. One random session id per
+  // page load — no cookies, no storage, no cross-visit identity.
+  // Excluded IPs and bots are silently dropped.
+  if (path === '/api/visit-events' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const ip = request.headers.get('CF-Connecting-IP');
+    if (isBot(request.headers.get('User-Agent')) || !ip || ip === 'unknown' || ip.length > 45) {
+      return json({ ok: true });
+    }
+    const excluded = await env.DB.prepare(
+      'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
+    ).bind(ip).first();
+    if (excluded) return json({ ok: true });
+    const allowedMin = await checkRateLimit(request, env, 'visit-events', CONFIG.eventMaxPerMin, 60);
+    const allowedHour = allowedMin && await checkRateLimit(request, env, 'visit-events-hour', CONFIG.eventMaxPerHour, 3600);
+    if (!allowedHour) return error('ძალიან ბევრი მოთხოვნა. სცადეთ მოგვიანებით.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const b = parsed.body;
+    if (typeof b.session !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(b.session)) return error('არასწორი სესია.', 400);
+    if (b.type !== 'pageview' && b.type !== 'click' && b.type !== 'time') return error('არასწორი მოვლენის ტიპი.', 400);
+    const cleanPath = typeof b.path === 'string' ? b.path.slice(0, 200) : null;
+    let label = null;
+    if (b.type === 'click') {
+      if (typeof b.label !== 'string') return error('არასწორი ეტიკეტი.', 400);
+      label = b.label.trim().slice(0, 100);
+      if (!label) return error('არასწორი ეტიკეტი.', 400);
+    }
+    let seconds = null;
+    let scroll = null;
+    if (b.type === 'time') {
+      if (!Number.isInteger(b.seconds) || b.seconds < 0 || b.seconds > 86400) return error('არასწორი დრო.', 400);
+      seconds = b.seconds;
+      if (b.scroll !== undefined && b.scroll !== null) {
+        if (!Number.isInteger(b.scroll) || b.scroll < 0 || b.scroll > 100) return error('არასწორი სქროლი.', 400);
+        scroll = b.scroll;
+      }
+    }
+    const now = Date.now();
+    await env.DB.prepare(
+      'INSERT INTO visit_events (ip, session, type, path, label, seconds, scroll, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).bind(ip, b.session, b.type, cleanPath, label, seconds, scroll, now).run();
+    await env.DB.prepare(
+      'DELETE FROM visit_events WHERE created_at < ?',
+    ).bind(now - CONFIG.visitorRetentionMs).run();
+    await env.DB.prepare(
+      'DELETE FROM visit_events WHERE id NOT IN (SELECT id FROM visit_events ORDER BY id DESC LIMIT ?)',
+    ).bind(CONFIG.maxVisitEvents).run();
+    return json({ ok: true });
+  }
+
   // --- v10.3: screen-size beacon (public, aggregate only) --------------
   // Fired once per main-page load from public.js. Stores ONLY the
   // resolution histogram — no IP, no identifier of any kind.
@@ -4009,12 +4116,12 @@ async function handleApi(request, env, url) {
     if (q) {
       const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
       rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer FROM visitors ' +
-        'WHERE ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\' OR language LIKE ? ESCAPE \'\\\' OR referrer LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
-      ).bind(like, like, like, like, like, like, like, like, like, like, CONFIG.maxVisitorsList).all();
+        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note FROM visitors ' +
+        'WHERE ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\' OR language LIKE ? ESCAPE \'\\\' OR referrer LIKE ? ESCAPE \'\\\' OR note LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
+      ).bind(like, like, like, like, like, like, like, like, like, like, like, CONFIG.maxVisitorsList).all();
     } else {
       rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer FROM visitors ' +
+        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note FROM visitors ' +
         'ORDER BY ' + orderBy + ' LIMIT ?',
       ).bind(CONFIG.maxVisitorsList).all();
     }
@@ -4053,11 +4160,28 @@ async function handleApi(request, env, url) {
         device: r.device || null,
         language: r.language || null,
         referrer: r.referrer || null,
+        note: r.note || null,
         users: usersByIp.get(r.ip) || [],
       })),
       totalDevices: totals ? totals.c : 0,
       totalVisits: totals ? totals.s : 0,
     });
+  }
+  // --- v10.4: admin note on a visitor IP (admin only) ------------------
+  if (path === '/api/admin/visitors' && method === 'PATCH') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const ip = parsed.body.ip;
+    const note = parsed.body.note;
+    if (typeof ip !== 'string' || !ip || ip.length > 45) return error('არასწორი IP.', 400);
+    if (typeof note !== 'string' || note.length > CONFIG.visitorNoteMaxChars) return error('შენიშვნა არასწორია.', 400);
+    const clean = note.trim();
+    const res = await env.DB.prepare(
+      'UPDATE visitors SET note = ? WHERE ip = ?',
+    ).bind(clean === '' ? null : clean, ip).run();
+    if (!res.success || res.meta.changes === 0) return error('სტუმარი ვერ მოიძებნა.', 404);
+    return json({ ok: true });
   }
   if (path === '/api/admin/visitors' && method === 'DELETE') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
@@ -4101,6 +4225,29 @@ async function handleApi(request, env, url) {
       'SELECT resolution, visits FROM screen_stats ORDER BY visits DESC LIMIT 50',
     ).all();
     return json({ screens: (rows.results || []).map((r) => ({ resolution: r.resolution, visits: r.visits })) });
+  }
+
+  // --- v10.4: behavior events for one IP (admin only) ------------------
+  if (path === '/api/admin/visitor-events' && method === 'GET') {
+    const ip = url.searchParams.get('ip') || '';
+    if (!ip || ip.length > 45) return error('არასწორი IP.', 400);
+    await env.DB.prepare(
+      'DELETE FROM visit_events WHERE created_at < ?',
+    ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
+    const rows = await env.DB.prepare(
+      'SELECT id, session, type, path, label, seconds, scroll, created_at FROM visit_events ' +
+      'WHERE ip = ? ORDER BY created_at DESC, id DESC LIMIT 50',
+    ).bind(ip).all();
+    return json({ events: (rows.results || []).map((r) => ({
+      id: r.id,
+      session: r.session,
+      type: r.type,
+      path: r.path,
+      label: r.label,
+      seconds: r.seconds,
+      scroll: r.scroll,
+      createdAt: r.created_at,
+    })) });
   }
 
   // --- v10.1: excluded IPs (admin only) --------------------------------

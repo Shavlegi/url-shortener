@@ -865,3 +865,46 @@ function onScanFound(value) {
     }).catch(() => {});
   } catch { /* ignore */ }
 })();
+
+/* v10.4: behavior tracking (admin-only viewing). One random session id
+   per page load — no cookies, no storage, no cross-visit identity.
+   Sends: page open, button/link clicks (labels only, never input
+   values), time on page + max scroll depth on leave. */
+(function trackBehavior() {
+  try {
+    const session = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : String(Date.now()) + '-' + Math.floor(Math.random() * 1e9);
+    const started = Date.now();
+    let maxScroll = 0;
+    function send(type, extra) {
+      try {
+        fetch('/api/visit-events', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(Object.assign({ session: session, type: type, path: window.location.pathname }, extra)),
+          keepalive: true,
+          credentials: 'same-origin',
+        }).catch(() => {});
+      } catch { /* ignore */ }
+    }
+    send('pageview', {});
+    document.addEventListener('click', (e) => {
+      const t = e.target && e.target.closest ? e.target.closest('button, a, [data-track], input[type="file"], summary') : null;
+      if (!t) return;
+      if (t.tagName === 'INPUT' && (t.type === 'text' || t.type === 'url' || t.type === 'tel' || t.type === 'email' || t.type === 'search' || t.type === 'password')) return;
+      const label = (t.id || t.getAttribute('aria-label') || (t.textContent || '')).trim().replace(/\s+/g, ' ').slice(0, 100);
+      if (!label) return;
+      send('click', { label: label });
+    }, { passive: true });
+    window.addEventListener('scroll', () => {
+      try {
+        const doc = document.documentElement;
+        const max = doc.scrollHeight - window.innerHeight;
+        if (max > 0) maxScroll = Math.max(maxScroll, Math.min(100, Math.round((window.scrollY / max) * 100)));
+      } catch { /* ignore */ }
+    }, { passive: true });
+    window.addEventListener('pagehide', (e) => {
+      if (e.persisted) return;
+      send('time', { seconds: Math.min(86400, Math.round((Date.now() - started) / 1000)), scroll: maxScroll });
+    });
+  } catch { /* ignore */ }
+})();
