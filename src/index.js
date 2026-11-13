@@ -81,9 +81,10 @@ const CONFIG = {
   telegramMaxPerHour: 10, // bot link creations per hour, per user
   telegramQrMaxPerMin: 10, // bot /qr generations per minute, per user
   telegramQrMaxPerHour: 60, // bot /qr generations per hour, per user
-  // v7.0: admin chat (1:1 with email-verified users; D1 only, no R2).
+  // v7.0: admin chat (1:1 with email-verified users). v7.3: attachments
+  // live in the private R2 bucket (env.CHAT_FILES), not in D1.
   chatMaxBodyChars: 2000, // message text cap
-  chatMaxAttachmentBytes: 1536 * 1024, // 1.5 MB decoded — D1 caps a value/row at 2 MB
+  chatMaxAttachmentBytes: 5 * 1024 * 1024, // 5 MB decoded (v7.3, R2 storage)
   chatUserMaxPerMin: 10, // messages per minute, per user id
   chatUserMaxPerHour: 100, // messages per hour, per user id
   chatAdminMaxPerMin: 30, // admin messages per minute
@@ -838,6 +839,52 @@ async function ensureV7Schema(env) {
   }
 }
 
+/* ---------------- Lazy v8 schema migration ---------------- */
+
+// Same idempotent pattern as v4 (see ensureV4Schema): applies
+// migrations/0008_chat_r2.sql on first use. Adds an `r2_key` column
+// (nullable) to chat_attachments: since v7.3, attachment bytes live
+// in the private R2 bucket and D1 keeps only the object key. Old rows
+// keep r2_key NULL and their legacy `data` blob — the download
+// endpoint still serves those via the old path. The `data` column is
+// kept (NOT NULL in the v7 schema) — new rows store an empty blob
+// there, never read when r2_key is set.
+let v8SchemaChecked = false;
+
+async function ensureV8Schema(env) {
+  if (v8SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v8_chat_r2'",
+    ).first();
+    if (flag && flag.value === '8') {
+      v8SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    // If the column already exists (migration applied twice), SQLite
+    // errors with "duplicate column" — the expected idempotent case.
+    try {
+      await env.DB.prepare('ALTER TABLE chat_attachments ADD COLUMN r2_key TEXT').run();
+    } catch (e) {
+      if (!String(e && e.message ? e.message : e).includes('duplicate column')) throw e;
+    }
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v8_chat_r2', '8')",
+    ).run();
+    v8SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v8 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — raw IP never stored) */
 /* ------------------------------------------------------------------ */
@@ -1450,17 +1497,19 @@ async function handleTelegramWebhook(request, env) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Admin chat (v7.0) — 1:1 threads with email-verified users           */
+/* Admin chat (v7.0; redesigned v7.1; R2 file storage in v7.3)       */
 /*                                                                     */
 /* One thread per user (chat_threads.user_id UNIQUE). The chat is      */
 /* visible ONLY to email-verified users — the gate is enforced         */
 /* server-side on every chat route, not by hiding UI. Users send       */
 /* TEXT only; the admin sends text + photos + files. Messages are      */
 /* plain text (chat_messages has NO blob column, so listing them       */
-/* never touches file bytes); attachments live in chat_attachments     */
-/* and are fetched only by id for downloads. D1 only — no R2, no       */
-/* new secret. Attachments are capped at 1.5 MB decoded because D1     */
-/* caps a single value / row at 2,000,000 bytes.                       */
+/* never touches file bytes). Since v7.3, attachment BYTES live in    */
+/* the private R2 bucket (env.CHAT_FILES, unguessable chat/ keys)      */
+/* and D1 keeps only metadata + the r2_key — D1 blobs proved           */
+/* unreliable on real D1 (bytes came back corrupt). Rows from          */
+/* v7.0/v7.1 keep their legacy D1 `data` blob and are still served     */
+/* by the old path. Attachments are capped at 5 MB decoded.            */
 /* ------------------------------------------------------------------ */
 
 // File types an admin may attach. Executables, HTML, SVG and everything
@@ -1486,7 +1535,8 @@ function sanitizeChatFileName(raw) {
 // Validates an attachment sent as { fileName, mimeType, dataBase64 }.
 // Returns { ok: true, attachment: null } when no attachment was sent,
 // { ok: true, attachment: { fileName, mimeType, bytes, sizeBytes } },
-// or { ok: false, reason }. The decoded size is capped at 1.5 MB.
+// or { ok: false, reason }. The decoded size is capped at 5 MB
+// (CONFIG.chatMaxAttachmentBytes; bytes go to R2 since v7.3).
 function validateChatAttachment(raw) {
   if (raw === undefined || raw === null) return { ok: true, attachment: null };
   if (typeof raw !== 'object' || Array.isArray(raw)) {
@@ -1508,9 +1558,12 @@ function validateChatAttachment(raw) {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
     return { ok: false, reason: 'ფაილი არასწორია.' };
   }
-  // Cheap pre-check before decoding: base64 inflates by ~4/3.
-  if (Math.floor(b64.length * 3 / 4) > CONFIG.chatMaxAttachmentBytes) {
-    return { ok: false, reason: 'ფაილი ძალიან დიდია (მაქს. 1.5 MB).' };
+  // Cheap pre-check before decoding: base64 inflates by ~4/3. The
+  // padding chars carry no bytes, so subtract them — otherwise a
+  // file of exactly the limit is wrongly rejected.
+  const pad = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+  if (Math.floor(b64.length * 3 / 4) - pad > CONFIG.chatMaxAttachmentBytes) {
+    return { ok: false, reason: 'ფაილი ძალიან დიდია (მაქს. 5 MB).' };
   }
   let bytes;
   try {
@@ -1520,7 +1573,7 @@ function validateChatAttachment(raw) {
   }
   if (bytes.length === 0) return { ok: false, reason: 'ფაილი ცარიელია.' };
   if (bytes.length > CONFIG.chatMaxAttachmentBytes) {
-    return { ok: false, reason: 'ფაილი ძალიან დიდია (მაქს. 1.5 MB).' };
+    return { ok: false, reason: 'ფაილი ძალიან დიდია (მაქს. 5 MB).' };
   }
   return {
     ok: true,
@@ -1623,18 +1676,44 @@ async function listChatMessages(env, threadId, after) {
 }
 
 // Inserts a message (+ optional attachment row) and bumps the OTHER
-// side's unread counter + the thread's last_message_at.
+// side's unread counter + the thread's last_message_at. Since v7.3,
+// attachment bytes go to the private R2 bucket (unguessable chat/
+// key) BEFORE the D1 row is written; D1 keeps metadata + r2_key and
+// an empty `data` placeholder (the column is NOT NULL in the v7
+// schema). If the R2 binding is missing, this THROWS — attachments
+// must never silently fall back to D1 blobs (that round-trip proved
+// corrupt on real D1). Callers with attachments check the binding
+// first and return a clear error instead.
 async function insertChatMessage(env, thread, sender, body, attachment) {
   const now = Date.now();
+  // Upload FIRST: a failed R2 put must not leave an orphan message
+  // row behind. The row insert below only runs once bytes are stored.
+  let r2Key = null;
+  if (attachment) {
+    if (!env.CHAT_FILES) {
+      throw new Error('R2 bucket is not bound (CHAT_FILES).');
+    }
+    r2Key = 'chat/' + crypto.randomUUID();
+    await env.CHAT_FILES.put(r2Key, attachment.bytes, {
+      httpMetadata: { contentType: attachment.mimeType },
+    });
+  }
   const ins = await env.DB.prepare(
     'INSERT INTO chat_messages (thread_id, sender, body, created_at) VALUES (?, ?, ?, ?)',
   ).bind(thread.id, sender, body, now).run();
   const messageId = ins.meta.last_row_id;
   let attJson = null;
   if (attachment) {
-    const ains = await env.DB.prepare(
-      'INSERT INTO chat_attachments (message_id, file_name, mime_type, size_bytes, data) VALUES (?, ?, ?, ?, ?)',
-    ).bind(messageId, attachment.fileName, attachment.mimeType, attachment.sizeBytes, attachment.bytes.buffer).run();
+    let ains;
+    try {
+      ains = await env.DB.prepare(
+        "INSERT INTO chat_attachments (message_id, file_name, mime_type, size_bytes, data, r2_key) VALUES (?, ?, ?, ?, x'', ?)",
+      ).bind(messageId, attachment.fileName, attachment.mimeType, attachment.sizeBytes, r2Key).run();
+    } catch (e) {
+      // Don't orphan the R2 object if the row insert fails.
+      try { await env.CHAT_FILES.delete(r2Key); } catch { /* best-effort */ }
+      throw e;
+    }
     attJson = {
       id: ains.meta.last_row_id,
       fileName: attachment.fileName,
@@ -1830,6 +1909,9 @@ async function handleApi(request, env, url) {
   // v7.0 schema (chat_threads, chat_messages, chat_attachments) — same
   // lazy pattern, see ensureV7Schema.
   await ensureV7Schema(env);
+  // v7.3 schema (chat_attachments.r2_key) — same lazy pattern, see
+  // ensureV8Schema.
+  await ensureV8Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -2332,7 +2414,9 @@ async function handleApi(request, env, url) {
   // Download an attachment — admin session OR the owning user session.
   // A user may download only attachments from their own thread; the
   // admin may download any. Content-Type comes from the allowlist and
-  // nosniff is set, so a stored file can never run as a page.
+  // nosniff is set, so a stored file can never run as a page. Since
+  // v7.3, bytes come from the private R2 bucket (r2_key); rows from
+  // v7.0/v7.1 without r2_key fall back to the legacy D1 `data` blob.
   if (path === '/api/chat/attachment') {
     if (method !== 'GET') return error('მეთოდი დაუშვებელია.', 405);
     const id = parseInt(url.searchParams.get('id') || '', 10);
@@ -2341,34 +2425,40 @@ async function handleApi(request, env, url) {
     let row = null;
     if (adminSession) {
       row = await env.DB.prepare(
-        'SELECT file_name, mime_type, size_bytes, data FROM chat_attachments WHERE id = ?',
+        'SELECT file_name, mime_type, size_bytes, data, r2_key FROM chat_attachments WHERE id = ?',
       ).bind(id).first();
     } else {
       const userSession = await getUserSession(env, request);
       if (!userSession) return error('შესვლა საჭიროა.', 401);
       if (!userSession.emailVerified) return error('ჩატი მხოლოდ მეილზე დადასტურებულ მომხმარებლებს აქვთ.', 403);
       row = await env.DB.prepare(
-        'SELECT a.file_name, a.mime_type, a.size_bytes, a.data ' +
+        'SELECT a.file_name, a.mime_type, a.size_bytes, a.data, a.r2_key ' +
         'FROM chat_attachments a JOIN chat_messages m ON m.id = a.message_id ' +
         'JOIN chat_threads t ON t.id = m.thread_id ' +
         'WHERE a.id = ? AND t.user_id = ?',
       ).bind(id, userSession.userId).first();
     }
     if (!row) return error('დანართი არ მოიძებნა.', 404);
-    const bytes = row.data instanceof ArrayBuffer ? new Uint8Array(row.data) : row.data;
     const isImage = String(row.mime_type).startsWith('image/');
     const asciiName = String(row.file_name).replace(/[^\x20-\x7E]/g, '_') || 'file';
-    return new Response(bytes, {
-      headers: {
-        'Content-Type': row.mime_type,
-        'Content-Length': String(row.size_bytes),
-        'Content-Disposition': (isImage ? 'inline' : 'attachment') +
-          '; filename="' + asciiName.replace(/"/g, '_') + '"' +
-          "; filename*=UTF-8''" + encodeURIComponent(row.file_name),
-        'X-Content-Type-Options': 'nosniff',
-        'Cache-Control': 'private, max-age=3600',
-      },
-    });
+    const headers = {
+      'Content-Type': row.mime_type,
+      'Content-Length': String(row.size_bytes),
+      'Content-Disposition': (isImage ? 'inline' : 'attachment') +
+        '; filename="' + asciiName.replace(/"/g, '_') + '"' +
+        "; filename*=UTF-8''" + encodeURIComponent(row.file_name),
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, max-age=3600',
+    };
+    if (row.r2_key) {
+      if (!env.CHAT_FILES) return error('ფაილების საცავი მიუწვდომელია.', 500);
+      const obj = await env.CHAT_FILES.get(row.r2_key);
+      if (!obj) return error('დანართი არ მოიძებნა.', 404);
+      return new Response(await obj.arrayBuffer(), { headers });
+    }
+    // Legacy row (v7.0/v7.1): serve the stored D1 blob as before.
+    const bytes = row.data instanceof ArrayBuffer ? new Uint8Array(row.data) : row.data;
+    return new Response(bytes, { headers });
   }
 
   // The user's own thread + messages. `?after=<id>` (polling) returns
@@ -2911,11 +3001,30 @@ async function handleApi(request, env, url) {
     }
     if (method === 'DELETE') {
       if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      // Collect the R2 keys FIRST so the objects can be removed too
+      // (v7.3+ rows; legacy rows have no r2_key). Best-effort: a
+      // failed lookup must not block deleting the thread itself.
+      let r2Keys = [];
+      try {
+        const keyRows = await env.DB.prepare(
+          'SELECT a.r2_key FROM chat_attachments a ' +
+          'JOIN chat_messages m ON m.id = a.message_id ' +
+          'WHERE m.thread_id = ? AND a.r2_key IS NOT NULL',
+        ).bind(threadId).all();
+        r2Keys = (keyRows.results || []).map((r) => r.r2_key).filter(Boolean);
+      } catch (e) {
+        console.error('chat delete: r2_key lookup failed:', e && e.message ? e.message : e);
+      }
       await env.DB.prepare(
         'DELETE FROM chat_attachments WHERE message_id IN (SELECT id FROM chat_messages WHERE thread_id = ?)',
       ).bind(threadId).run();
       await env.DB.prepare('DELETE FROM chat_messages WHERE thread_id = ?').bind(threadId).run();
       await env.DB.prepare('DELETE FROM chat_threads WHERE id = ?').bind(threadId).run();
+      if (env.CHAT_FILES) {
+        for (const key of r2Keys) {
+          try { await env.CHAT_FILES.delete(key); } catch { /* best-effort, ignore missing */ }
+        }
+      }
       return json({ ok: true });
     }
     return error('მეთოდი დაუშვებელია.', 405);
@@ -2942,6 +3051,12 @@ async function handleApi(request, env, url) {
     if (!lv.ok) return error(lv.reason, 400);
     const av = validateChatAttachment(parsed.body.attachment);
     if (!av.ok) return error(av.reason, 400);
+    // Fail LOUDLY when the R2 binding is missing: attachments must
+    // never silently fall back to D1 blobs (that round-trip proved
+    // corrupt on real D1). Text-only messages need no R2.
+    if (av.attachment && !env.CHAT_FILES) {
+      return error('ფაილების საცავი (R2) არ არის დაკავშირებული — დანართის გაგზავნა შეუძლებელია.', 500);
+    }
     if (lv.url && (body || av.attachment)) return error('ლინკი ცალკე შეტყობინებად იგზავნება.', 400);
     const finalBody = lv.url || body;
     if (!finalBody && !av.attachment) return error('შეტყობინება ცარიელია.', 400);

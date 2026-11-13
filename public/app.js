@@ -1252,8 +1252,8 @@ $('import-file').addEventListener('change', async (e) => {
 
 /* ---------------- Admin chat (v7.0, redesigned in v7.1) ---------------- */
 // 1:1 threads with email-verified users. The admin sends text + files
-// (photos are compressed client-side before upload, max 1.5 MB — the
-// server enforces the same cap). v7.1: the tab shows a list of ALL
+// (photos are compressed client-side before upload, max 5 MB — the
+// server enforces the same cap; files live in the private R2 bucket). v7.1: the tab shows a list of ALL
 // verified users; tapping a user opens the conversation (empty when
 // there is no history yet). Opening a chat NEVER sends anything —
 // the thread row is created lazily on the first explicit send. The
@@ -1261,7 +1261,7 @@ $('import-file').addEventListener('change', async (e) => {
 // only on an explicit tap. While the chat tab is open, the open
 // thread (or the users list) refreshes every 5 seconds.
 const CHAT_POLL_MS = 5000;
-const CHAT_MAX_ATTACHMENT_BYTES = 1536 * 1024; // 1.5 MB, same as the server cap
+const CHAT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB, same as the server cap
 
 let chatUsers = []; // verified users + thread summary, from /api/admin/chat/users
 let chatOpenThreadId = null; // thread id, or null when the user has no thread yet
@@ -1349,12 +1349,81 @@ function formatBytes(n) {
   return (n / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
+// LINKIFY-START
+// Splits plain message text into [{ text }] and [{ url }] segments so
+// URLs render as clickable links. PURE function: no DOM use, no side
+// effects — the test harness extracts and tests it in isolation.
+// Only http:// and https:// URLs become links; javascript:/data: and
+// friends never do. Trailing punctuation (.,;:!?) and unbalanced
+// closing brackets are excluded from the URL. NOTE: an identical
+// copy lives in the other chat file (app.js and auth.js) — keep the
+// two in sync.
+function linkifySegments(text) {
+  const segments = [];
+  const re = /https?:\/\/[^\s<>"'`]+/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const raw = m[0];
+    let cut = raw.length;
+    while (cut > 0 && '.,;:!?'.includes(raw[cut - 1])) cut--;
+    // Strip unbalanced closing brackets: "(https://x.example/)" loses
+    // the ")" but "https://x.example/wiki/A_(B)" keeps its own.
+    const pairs = { ')': '(', ']': '[', '}': '{' };
+    while (cut > 0 && pairs[raw[cut - 1]]) {
+      const close = raw[cut - 1];
+      const open = pairs[close];
+      const body = raw.slice(0, cut - 1); // exclude the bracket itself
+      let depth = 0;
+      for (const ch of body) {
+        if (ch === open) depth++;
+        else if (ch === close) depth--;
+      }
+      if (depth > 0) break; // balanced — the bracket belongs to the URL
+      cut--;
+    }
+    let url = raw.slice(0, cut);
+    const tail = raw.slice(cut);
+    // Degenerate match ("https://" with nothing after it) stays text.
+    if (!/^https?:\/\/[^/]/.test(url)) url = '';
+    if (m.index > last) segments.push({ text: text.slice(last, m.index) });
+    if (url) {
+      segments.push({ url });
+      if (tail) segments.push({ text: tail });
+    } else {
+      segments.push({ text: raw });
+    }
+    last = m.index + raw.length;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last) });
+  return segments;
+}
+// LINKIFY-END
+
+// Renders a message body into `parent`: plain text stays text, URLs
+// become <a> links. Built with the DOM API only — user text is never
+// inserted as HTML, so no markup (or script) can break out.
+function appendLinkifiedText(parent, text) {
+  for (const seg of linkifySegments(text)) {
+    if (seg.url) {
+      const a = document.createElement('a');
+      a.href = seg.url;
+      a.textContent = seg.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      parent.appendChild(a);
+    } else {
+      parent.appendChild(document.createTextNode(seg.text));
+    }
+  }
+}
+
 function chatMessageEl(msg, mine) {
   const el = document.createElement('div');
   el.className = 'chat-msg ' + (mine ? 'mine' : 'theirs');
   if (msg.body) {
     const p = document.createElement('div');
-    p.textContent = msg.body;
+    appendLinkifiedText(p, msg.body);
     el.appendChild(p);
   }
   if (msg.attachment) {
@@ -1581,7 +1650,7 @@ function canvasToBlob(canvas, type, quality) {
 }
 
 // Photos are compressed client-side (max side 1600px, JPEG ~0.85) so a
-// phone photo fits the 1.5 MB server cap. GIFs keep animation (no
+// phone photo fits the 5 MB server cap. GIFs keep animation (no
 // recompress); PDFs, text and ZIP pass through unchanged.
 async function prepareChatAttachment(file) {
   const mime = (file.type || '').toLowerCase();
@@ -1607,7 +1676,7 @@ async function prepareChatAttachment(file) {
     outName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
   }
   if (blob.size > CHAT_MAX_ATTACHMENT_BYTES) {
-    throw new Error('ფაილი ძალიან დიდია (მაქს. 1.5 MB).');
+    throw new Error('ფაილი ძალიან დიდია (მაქს. 5 MB).');
   }
   const dataUrl = await readFileAsDataUrl(blob);
   const base64 = String(dataUrl).split(',')[1] || '';

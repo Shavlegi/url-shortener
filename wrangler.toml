@@ -28,6 +28,15 @@ binding = "DB"
 database_name = "mini-link-db"
 database_id = "0cbd4526-465f-4cdb-81e2-0cdff3ed9401"
 
+# R2 bucket binding (v7.3: admin-chat file storage). `binding` must stay
+# "CHAT_FILES" — the Worker code reads env.CHAT_FILES. The bucket must
+# exist before deploy (created in the dashboard: R2 -> minilink-files,
+# Standard storage class, private). Files are served ONLY through the
+# Worker with session auth — the bucket itself stays non-public.
+[[r2_buckets]]
+binding = "CHAT_FILES"
+bucket_name = "minilink-files"
+
 # Static frontend files (public/). The Worker runs first for every request
 # (routing, redirects, API) and serves these files itself via the ASSETS binding
 # (or from the embedded copy in the single-file build).

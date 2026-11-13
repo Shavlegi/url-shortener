@@ -564,13 +564,82 @@ function userChatFormatBytes(n) {
   return (n / (1024 * 1024)).toFixed(2) + ' MB';
 }
 
+// LINKIFY-START
+// Splits plain message text into [{ text }] and [{ url }] segments so
+// URLs render as clickable links. PURE function: no DOM use, no side
+// effects — the test harness extracts and tests it in isolation.
+// Only http:// and https:// URLs become links; javascript:/data: and
+// friends never do. Trailing punctuation (.,;:!?) and unbalanced
+// closing brackets are excluded from the URL. NOTE: an identical
+// copy lives in the other chat file (app.js and auth.js) — keep the
+// two in sync.
+function linkifySegments(text) {
+  const segments = [];
+  const re = /https?:\/\/[^\s<>"'`]+/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const raw = m[0];
+    let cut = raw.length;
+    while (cut > 0 && '.,;:!?'.includes(raw[cut - 1])) cut--;
+    // Strip unbalanced closing brackets: "(https://x.example/)" loses
+    // the ")" but "https://x.example/wiki/A_(B)" keeps its own.
+    const pairs = { ')': '(', ']': '[', '}': '{' };
+    while (cut > 0 && pairs[raw[cut - 1]]) {
+      const close = raw[cut - 1];
+      const open = pairs[close];
+      const body = raw.slice(0, cut - 1); // exclude the bracket itself
+      let depth = 0;
+      for (const ch of body) {
+        if (ch === open) depth++;
+        else if (ch === close) depth--;
+      }
+      if (depth > 0) break; // balanced — the bracket belongs to the URL
+      cut--;
+    }
+    let url = raw.slice(0, cut);
+    const tail = raw.slice(cut);
+    // Degenerate match ("https://" with nothing after it) stays text.
+    if (!/^https?:\/\/[^/]/.test(url)) url = '';
+    if (m.index > last) segments.push({ text: text.slice(last, m.index) });
+    if (url) {
+      segments.push({ url });
+      if (tail) segments.push({ text: tail });
+    } else {
+      segments.push({ text: raw });
+    }
+    last = m.index + raw.length;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last) });
+  return segments;
+}
+// LINKIFY-END
+
+// Renders a message body into `parent`: plain text stays text, URLs
+// become <a> links. Built with the DOM API only — user text is never
+// inserted as HTML, so no markup (or script) can break out.
+function appendLinkifiedText(parent, text) {
+  for (const seg of linkifySegments(text)) {
+    if (seg.url) {
+      const a = document.createElement('a');
+      a.href = seg.url;
+      a.textContent = seg.url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      parent.appendChild(a);
+    } else {
+      parent.appendChild(document.createTextNode(seg.text));
+    }
+  }
+}
+
 function userChatMessageEl(msg) {
   const mine = msg.sender === 'user';
   const box = document.createElement('div');
   box.className = 'chat-msg ' + (mine ? 'mine' : 'theirs');
   if (msg.body) {
     const p = document.createElement('div');
-    p.textContent = msg.body;
+    appendLinkifiedText(p, msg.body);
     box.appendChild(p);
   }
   if (msg.attachment) {

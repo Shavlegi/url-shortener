@@ -1,0 +1,16 @@
+-- 0008_chat_r2.sql — Mini Link v7.3: R2 key for chat attachments
+-- Applied with: wrangler d1 migrations apply mini-link-db --remote
+-- (or once, in the Cloudflare dashboard: D1 -> your database -> Console)
+--
+-- NOTE: the Worker ALSO self-applies this schema lazily on its first API
+-- call (see ensureV8Schema in src/index.js: ALTER TABLE + a schema_meta
+-- version flag). That is what applies it on the live database. This file
+-- exists for fresh installs and for the record.
+--
+-- Since v7.3, attachment BYTES live in the private R2 bucket
+-- (env.CHAT_FILES, unguessable `chat/` keys) and D1 keeps only the
+-- object key here. Old rows keep r2_key NULL and their legacy `data`
+-- blob — the download endpoint still serves those via the old path.
+-- The `data` column is kept (NOT NULL in the v7 schema); new rows
+-- store an empty blob there, never read when r2_key is set.
+ALTER TABLE chat_attachments ADD COLUMN r2_key TEXT;
