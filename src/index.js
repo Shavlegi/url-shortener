@@ -1243,6 +1243,39 @@ async function ensureV15Schema(env) {
   }
 }
 
+let v16SchemaChecked = false;
+
+// v10.7: IP favorites (admin-only). `visitors.is_favorite` marks an IP
+// the admin saved; favorites are exempt from the 90-day inactivity
+// prune, age cleanup and clear-all (see the visitors handlers).
+async function ensureV16Schema(env) {
+  if (v16SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v16_visitor_favorites'",
+    ).first();
+    if (flag && flag.value === '16') {
+      v16SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await addColumnIfMissing(env, 'ALTER TABLE visitors ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0');
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v16_visitor_favorites', '16')",
+    ).run();
+    v16SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v16 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — the limiter itself   */
 /* never stores raw IPs; visitor IPs live only in the v10 visitors    */
@@ -2577,7 +2610,9 @@ function primaryLanguage(request) {
    (visit count + first/last seen + last path). Raw IPs live ONLY in the
    visitors table and are served ONLY to the admin session; no public
    endpoint ever returns them. Rows older than
-   CONFIG.visitorRetentionMs are pruned on every recorded visit.
+   CONFIG.visitorRetentionMs are pruned on every recorded visit,
+   except favorites (v10.7: `is_favorite` rows and their mappings and
+   events are exempt from every automatic/batch deletion).
    recordVisit never throws — a logging failure must never break the
    visitor's response. */
 // v10.6: security event log (admin-only). Records failed logins,
@@ -2629,6 +2664,7 @@ async function recordVisit(env, request, path) {
     await ensureV11Schema(env);
     await ensureV12Schema(env);
     await ensureV13Schema(env);
+    await ensureV16Schema(env);
     // v10.1: admin-excluded IPs are never recorded.
     const excluded = await env.DB.prepare(
       'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
@@ -2678,11 +2714,14 @@ async function recordVisit(env, request, path) {
         'os = COALESCE(excluded.os, os), device = COALESCE(excluded.device, device), language = COALESCE(excluded.language, language), ' +
         'referrer = COALESCE(excluded.referrer, referrer)',
       ).bind(ip, now, now, cleanPath, e.country, e.city, e.region, e.postalCode, e.latitude, e.longitude, e.timezone, e.isp, e.asn, e.isEu, e.browser, e.os, e.device, e.language, e.referrer),
+      // v10.7: favorites are exempt from the inactivity prune, and so
+      // are their user mappings (the subquery reads the visitors table
+      // after the prune above, where favorite rows survive).
       env.DB.prepare(
-        'DELETE FROM visitors WHERE last_seen < ?',
+        'DELETE FROM visitors WHERE last_seen < ? AND COALESCE(is_favorite, 0) = 0',
       ).bind(now - CONFIG.visitorRetentionMs),
       env.DB.prepare(
-        'DELETE FROM visitor_users WHERE last_seen < ?',
+        'DELETE FROM visitor_users WHERE last_seen < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)',
       ).bind(now - CONFIG.visitorRetentionMs),
       ...(userId ? [env.DB.prepare(
         'INSERT INTO visitor_users (ip, user_id, last_seen) VALUES (?, ?, ?) ' +
@@ -2849,6 +2888,8 @@ async function handleApi(request, env, url) {
   await ensureV14Schema(env);
   // v10.6 schema (security_events) — same lazy pattern, see ensureV15Schema.
   await ensureV15Schema(env);
+  // v10.7 schema (visitors is_favorite) — same lazy pattern, see ensureV16Schema.
+  await ensureV16Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -3311,7 +3352,7 @@ async function handleApi(request, env, url) {
       'INSERT INTO visit_events (ip, session, type, path, label, seconds, scroll, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     ).bind(ip, b.session, b.type, cleanPath, label, seconds, scroll, now).run();
     await env.DB.prepare(
-      'DELETE FROM visit_events WHERE created_at < ?',
+      'DELETE FROM visit_events WHERE created_at < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)',
     ).bind(now - CONFIG.visitorRetentionMs).run();
     await env.DB.prepare(
       'DELETE FROM visit_events WHERE id NOT IN (SELECT id FROM visit_events ORDER BY id DESC LIMIT ?)',
@@ -4218,22 +4259,24 @@ async function handleApi(request, env, url) {
     };
     const orderBy = visitorSort[url.searchParams.get('sort')] || visitorSort.last_desc;
     const q = (url.searchParams.get('q') || '').trim();
+    // v10.7: favorites (and their user mappings) are exempt from the
+    // inactivity prune on read, same as in recordVisit.
     await env.DB.prepare(
-      'DELETE FROM visitors WHERE last_seen < ?',
+      'DELETE FROM visitors WHERE last_seen < ? AND COALESCE(is_favorite, 0) = 0',
     ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
     await env.DB.prepare(
-      'DELETE FROM visitor_users WHERE last_seen < ?',
+      'DELETE FROM visitor_users WHERE last_seen < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)',
     ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
     let rows;
     if (q) {
       const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
       rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note FROM visitors ' +
+        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note, is_favorite FROM visitors ' +
         'WHERE ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\' OR language LIKE ? ESCAPE \'\\\' OR referrer LIKE ? ESCAPE \'\\\' OR note LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
       ).bind(like, like, like, like, like, like, like, like, like, like, like, CONFIG.maxVisitorsList).all();
     } else {
       rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note FROM visitors ' +
+        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note, is_favorite FROM visitors ' +
         'ORDER BY ' + orderBy + ' LIMIT ?',
       ).bind(CONFIG.maxVisitorsList).all();
     }
@@ -4273,6 +4316,7 @@ async function handleApi(request, env, url) {
         language: r.language || null,
         referrer: r.referrer || null,
         note: r.note || null,
+        favorite: r.is_favorite === 1,
         users: usersByIp.get(r.ip) || [],
       })),
       totalDevices: totals ? totals.c : 0,
@@ -4280,18 +4324,35 @@ async function handleApi(request, env, url) {
     });
   }
   // --- v10.4: admin note on a visitor IP (admin only) ------------------
+  // v10.7: also accepts an optional `favorite` boolean. At least one
+  // of note/favorite must be present; either may be sent alone.
   if (path === '/api/admin/visitors' && method === 'PATCH') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const parsed = await readJson(request);
     if (!parsed.ok) return error(parsed.reason, 400);
     const ip = parsed.body.ip;
-    const note = parsed.body.note;
+    const hasNote = parsed.body.note !== undefined;
+    const hasFavorite = parsed.body.favorite !== undefined;
     if (typeof ip !== 'string' || !ip || ip.length > 45) return error('არასწორი IP.', 400);
-    if (typeof note !== 'string' || note.length > CONFIG.visitorNoteMaxChars) return error('შენიშვნა არასწორია.', 400);
-    const clean = note.trim();
+    if (!hasNote && !hasFavorite) return error('შენიშვნა ან ფავორიტი მიუთითეთ.', 400);
+    const sets = [];
+    const binds = [];
+    if (hasNote) {
+      const note = parsed.body.note;
+      if (typeof note !== 'string' || note.length > CONFIG.visitorNoteMaxChars) return error('შენიშვნა არასწორია.', 400);
+      const clean = note.trim();
+      sets.push('note = ?');
+      binds.push(clean === '' ? null : clean);
+    }
+    if (hasFavorite) {
+      if (typeof parsed.body.favorite !== 'boolean') return error('ფავორიტის მნიშვნელობა არასწორია.', 400);
+      sets.push('is_favorite = ?');
+      binds.push(parsed.body.favorite ? 1 : 0);
+    }
+    binds.push(ip);
     const res = await env.DB.prepare(
-      'UPDATE visitors SET note = ? WHERE ip = ?',
-    ).bind(clean === '' ? null : clean, ip).run();
+      'UPDATE visitors SET ' + sets.join(', ') + ' WHERE ip = ?',
+    ).bind(...binds).run();
     if (!res.success || res.meta.changes === 0) return error('სტუმარი ვერ მოიძებნა.', 404);
     return json({ ok: true });
   }
@@ -4310,23 +4371,26 @@ async function handleApi(request, env, url) {
     }
     // v10.5: manual cleanup by age — deletes everything older than N days
     // (inactivity-based, same rule as automatic pruning).
+    // v10.7: favorites (and their mappings/events) are exempt.
     if (olderThanRaw !== null) {
       const days = Number(olderThanRaw);
       if (!Number.isInteger(days) || days < 1 || days > 365) return error('არასწორი ვადა (1–365 დღე).', 400);
       const cutoff = Date.now() - days * 86400000;
       const cutoffDay = tbilisiDayHour(Date.now() - (days - 1) * 86400000).day;
-      const r1 = await env.DB.prepare('DELETE FROM visitors WHERE last_seen < ?').bind(cutoff).run();
-      const r2 = await env.DB.prepare('DELETE FROM visitor_users WHERE last_seen < ?').bind(cutoff).run();
-      const r3 = await env.DB.prepare('DELETE FROM visit_events WHERE created_at < ?').bind(cutoff).run();
+      const r1 = await env.DB.prepare('DELETE FROM visitors WHERE last_seen < ? AND COALESCE(is_favorite, 0) = 0').bind(cutoff).run();
+      const r2 = await env.DB.prepare('DELETE FROM visitor_users WHERE last_seen < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)').bind(cutoff).run();
+      const r3 = await env.DB.prepare('DELETE FROM visit_events WHERE created_at < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)').bind(cutoff).run();
       const r4 = await env.DB.prepare('DELETE FROM visit_hours WHERE day < ?').bind(cutoffDay).run();
       const r5 = await env.DB.prepare('DELETE FROM path_stats WHERE last_seen < ?').bind(cutoff).run();
       const r6 = await env.DB.prepare('DELETE FROM security_events WHERE created_at < ?').bind(cutoff).run();
       const changes = (r) => (r.meta ? r.meta.changes : 0);
       return json({ ok: true, deleted: { visitors: changes(r1), visitorUsers: changes(r2), events: changes(r3), hours: changes(r4), paths: changes(r5), securityEvents: changes(r6) } });
     }
-    const res = await env.DB.prepare('DELETE FROM visitors').run();
-    await env.DB.prepare('DELETE FROM visitor_users').run();
-    await env.DB.prepare('DELETE FROM visit_events').run();
+    // v10.7: clear-all keeps favorite rows (and their mappings/events);
+    // the deleted count reflects only what was actually removed.
+    const res = await env.DB.prepare('DELETE FROM visitors WHERE COALESCE(is_favorite, 0) = 0').run();
+    await env.DB.prepare('DELETE FROM visitor_users WHERE ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)').run();
+    await env.DB.prepare('DELETE FROM visit_events WHERE ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)').run();
     await env.DB.prepare('DELETE FROM visit_hours').run();
     await env.DB.prepare('DELETE FROM path_stats').run();
     await env.DB.prepare('DELETE FROM security_events').run();
@@ -4368,8 +4432,9 @@ async function handleApi(request, env, url) {
   if (path === '/api/admin/visitor-events' && method === 'GET') {
     const ip = url.searchParams.get('ip') || '';
     if (!ip || ip.length > 45) return error('არასწორი IP.', 400);
+    // v10.7: a favorite IP's events are exempt from the age prune.
     await env.DB.prepare(
-      'DELETE FROM visit_events WHERE created_at < ?',
+      'DELETE FROM visit_events WHERE created_at < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)',
     ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
     const rows = await env.DB.prepare(
       'SELECT id, session, type, path, label, seconds, scroll, created_at FROM visit_events ' +

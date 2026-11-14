@@ -1,0 +1,17 @@
+-- 0016_visitor_favorites.sql — Mini Link v10.7: IP favorites (admin-only)
+-- Applied with: wrangler d1 migrations apply mini-link-db --remote
+-- (or once, in the Cloudflare dashboard: D1 -> your database -> Console)
+--
+-- NOTE: the Worker ALSO self-applies this schema lazily (see
+-- ensureV16Schema in src/index.js, with a duplicate-column-tolerant
+-- ALTER). That is what applies it on the live database. This file
+-- exists for fresh installs and for `wrangler d1 migrations apply`.
+--
+-- `visitors.is_favorite` marks an IP the admin saved as a favorite.
+-- Favorites are exempt from the 90-day inactivity prune, from manual
+-- age cleanup and from clear-all; their `visitor_users` mappings and
+-- `visit_events` rows are exempt from those same deletions, so the
+-- surviving row keeps its history. Per-IP delete and exclusion-add
+-- still remove a favorite explicitly. `security_events` keeps its own
+-- 90-day rule, unchanged.
+ALTER TABLE visitors ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;

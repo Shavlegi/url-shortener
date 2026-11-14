@@ -3,7 +3,8 @@
 Mini Link — უფასო, თვით-ჰოსტინგის ბმულების შემოკლება — **Cloudflare Workers + Cloudflare D1**,
 ქართული ინტერფეისით, QR კოდებით და კლიკების სტატისტიკით. ვიზიტორების IP
 მისამართები ინახება მხოლოდ ადმინისტრატორის სტატისტიკისთვის (v10.5 — 90 დღე,
-მერე ავტომატურად იშლება; ქუქი-თრექინგი არ არის).
+მერე ავტომატურად იშლება, გარდა ადმინის ფავორიტებში შენახული IP-ებისა —
+v10.7; ქუქი-თრექინგი არ არის).
 
 **საჯარო საიტი:** ნებისმიერს შეუძლია ბმულის დამოკლება `minilink.space`-ზე —
 რეგისტრაციის გარეშე. **ადმინ პანელი** ცალკე მისამართზეა
@@ -19,7 +20,8 @@ Mini Link — უფასო, თვით-ჰოსტინგის ბმ�
 > **English summary:** Mini Link — a free, self-hosted URL shortener on Cloudflare Workers + D1,
 > with a Georgian UI, QR codes and click stats. Visitor IPs and visit details
 > (country/city/ISP, device, language, referrer) are logged admin-only
-> with 90-day retention (v10.0/v10.5); no cookie tracking.
+> with 90-day retention (v10.0/v10.5; admin-saved favorite IPs exempt,
+> v10.7); no cookie tracking.
 > The public site (minilink.space) lets anyone shorten a link; the admin panel
 > (admin.minilink.space) is separate and password-protected. Admin login uses
 > PBKDF2-SHA256 + server-side sessions. v2 adds voluntary user accounts with
@@ -68,7 +70,11 @@ Mini Link — უფასო, თვით-ჰოსტინგის ბმ�
   თვალთვალი და შენიშვნები (v10.4, მხოლოდ ადმინში): მთავარ გვერდზე
   ვიზიტორის ქცევა — გახსნა, დაჭერები (მხოლოდ ღილაკის სახელი, შეყვანილი
   ტექსტი არასოდეს), გვერდზე გატარებული დრო და სქროლი; ყოველ IP-ზე
-  ადმინის შენიშვნა (500 სიმბოლომდე)
+  ადმინის შენიშვნა (500 სიმბოლომდე); ფავორიტები (v10.7, მხოლოდ
+  ადმინში): IP-ის ფავორიტებში შენახვა — ფავორიტი არ იშლება 90-დღიანი
+  ვადით, ვადით გასუფთავებით და სიის გასუფთავებით (მის კავშირებსა და
+  მოვლენებზეც იგივე ვრცელდება); ცალკე წაშლა და გამონაკლისში დამატება
+  მაინც შლის მას
 - **უსაფრთხოება (v10.6):** HTTP → HTTPS გადამისამართება (301) და
   უსაფრთხოების სათაურები ყველა პასუხზე (HSTS, nosniff, CSP,
   frame-ancestors, Referrer-Policy); უსაფრთხოების ლოგი მხოლოდ ადმინში —

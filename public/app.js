@@ -867,7 +867,7 @@ function visitorCard(v) {
 
   const meta = document.createElement('p');
   meta.className = 'link-meta';
-  meta.textContent = v.visits + ' ვიზიტი · პირველი: ' + fmtDate(v.firstSeen) + ' · ბოლო: ' + fmtDate(v.lastSeen);
+  meta.textContent = v.visits + ' ვიზიტი · პირველი: ' + fmtDate(v.firstSeen) + ' · ბოლო: ' + fmtDate(v.lastSeen) + (v.favorite ? ' · ⭐ ფავორიტი' : '');
   card.appendChild(meta);
 
   if (v.users && v.users.length > 0) {
@@ -1054,6 +1054,20 @@ function visitorCard(v) {
     noteEditor.hidden = !noteEditor.hidden;
   });
   actions.appendChild(noteBtn);
+  // v10.7: favorite toggle — favorites are exempt from the 90-day
+  // prune, age cleanup and clear-all. No confirm: fully reversible.
+  const favBtn = document.createElement('button');
+  favBtn.className = 'btn small';
+  favBtn.type = 'button';
+  favBtn.textContent = v.favorite ? '★ ფავორიტებიდან მოხსნა' : '⭐ ფავორიტებში';
+  favBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/visitors', { method: 'PATCH', body: JSON.stringify({ ip: v.ip, favorite: !v.favorite }) });
+      toast(v.favorite ? 'ფავორიტებიდან მოიხსნა' : 'ფავორიტებში დაემატა');
+      loadVisitors();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(favBtn);
   const trackBtn = document.createElement('button');
   trackBtn.className = 'btn small';
   trackBtn.type = 'button';
@@ -1078,7 +1092,7 @@ $('visitor-search-input').addEventListener('input', () => {
 });
 $('visitor-sort-select').addEventListener('change', loadVisitors);
 $('visitors-clear-btn').addEventListener('click', async () => {
-  if (!window.confirm('ნამდვილად გაასუფთავო სტუმრების მთლიანი სია? ეს მოქმედება უკან ვერ დაბრუნდება.')) return;
+  if (!window.confirm('ნამდვილად გაასუფთავო სტუმრების სია? ფავორიტებში შენახული IP-ები არ წაიშლება. ეს მოქმედება უკან ვერ დაბრუნდება.')) return;
   try {
     const data = await api('/api/admin/visitors', { method: 'DELETE' });
     toast('გასუფთავდა: ' + (data.deleted || 0) + ' ჩანაწერი');
@@ -1089,7 +1103,7 @@ $('visitors-clear-btn').addEventListener('click', async () => {
 const CLEANUP_BTNS = { 'visitors-clean-7-btn': 7, 'visitors-clean-30-btn': 30, 'visitors-clean-90-btn': 90 };
 for (const [id, days] of Object.entries(CLEANUP_BTNS)) {
   $(id).addEventListener('click', async () => {
-    if (!window.confirm('წაიშლება ' + days + ' დღეზე ძველი ყველა ჩანაწერი (სტუმრები, მოვლენები, სტატისტიკა). გაგრძელება?')) return;
+    if (!window.confirm('წაიშლება ' + days + ' დღეზე ძველი ყველა ჩანაწერი (სტუმრები, მოვლენები, სტატისტიკა; ფავორიტების გარდა). გაგრძელება?')) return;
     try {
       const data = await api('/api/admin/visitors?olderThanDays=' + days, { method: 'DELETE' });
       const d = data.deleted || {};
