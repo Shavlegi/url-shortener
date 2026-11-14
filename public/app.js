@@ -818,7 +818,10 @@ $('profile-modal').addEventListener('click', (e) => {
 // Visitor IPs — admin only. Search + sort run server-side
 // (see GET /api/admin/visitors). List loads on login and when the tab opens.
 let visitors = [];
-let visitorTotals = { totalDevices: 0, totalVisits: 0 };
+let visitorTotals = { totalDevices: 0, totalVisits: 0, totalFavorites: 0 };
+// v10.8: favorites-only view — the flag rides on every list fetch, so the
+// existing search + sort controls keep working on the filtered set.
+let favoritesOnly = false;
 
 async function loadVisitors() {
   const err = $('visitors-error');
@@ -828,11 +831,12 @@ async function loadVisitors() {
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   if (sort) params.set('sort', sort);
+  if (favoritesOnly) params.set('favorites', '1');
   const qs = params.toString();
   try {
     const data = await api('/api/admin/visitors' + (qs ? ('?' + qs) : ''));
     visitors = data.visitors || [];
-    visitorTotals = { totalDevices: data.totalDevices || 0, totalVisits: data.totalVisits || 0 };
+    visitorTotals = { totalDevices: data.totalDevices || 0, totalVisits: data.totalVisits || 0, totalFavorites: data.totalFavorites || 0 };
     renderVisitors();
   } catch (e) {
     showError(err, e.message || 'სტუმრების ჩატვირთვა ვერ მოხერხდა.');
@@ -842,12 +846,12 @@ async function loadVisitors() {
 function renderVisitors() {
   const list = $('visitors-list');
   list.innerHTML = '';
-  $('visitors-totals').textContent = 'სულ ' + visitorTotals.totalDevices + ' მოწყობილობა · ' + visitorTotals.totalVisits + ' ვიზიტი';
+  $('visitors-totals').textContent = 'სულ ' + visitorTotals.totalDevices + ' მოწყობილობა · ' + visitorTotals.totalVisits + ' ვიზიტი · ⭐ ფავორიტი: ' + visitorTotals.totalFavorites;
   const statEl = $('stat-visitors');
   if (statEl) statEl.textContent = String(visitorTotals.totalDevices);
   const q = ($('visitor-search-input').value || '').trim();
   $('visitors-empty').hidden = visitors.length !== 0;
-  $('visitors-empty').textContent = q ? 'IP ვერ მოიძებნა.' : 'სტუმრები ჯერ არ არიან.';
+  $('visitors-empty').textContent = q ? 'IP ვერ მოიძებნა.' : (favoritesOnly ? 'ფავორიტები ჯერ არ არის.' : 'სტუმრები ჯერ არ არიან.');
   for (const v of visitors) {
     list.appendChild(visitorCard(v));
   }
@@ -1091,6 +1095,15 @@ $('visitor-search-input').addEventListener('input', () => {
   visitorSearchTimer = setTimeout(loadVisitors, 350);
 });
 $('visitor-sort-select').addEventListener('change', loadVisitors);
+// v10.8: favorites-only toggle — refetches the list with favorites=1;
+// the search + sort controls keep working on the filtered set. The list
+// sits above the exclusions block, so scroll it into view on toggle.
+$('favorites-toggle-btn').addEventListener('click', () => {
+  favoritesOnly = !favoritesOnly;
+  $('favorites-toggle-btn').classList.toggle('primary', favoritesOnly);
+  loadVisitors();
+  $('section-visitors').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 $('visitors-clear-btn').addEventListener('click', async () => {
   if (!window.confirm('ნამდვილად გაასუფთავო სტუმრების სია? ფავორიტებში შენახული IP-ები არ წაიშლება. ეს მოქმედება უკან ვერ დაბრუნდება.')) return;
   try {

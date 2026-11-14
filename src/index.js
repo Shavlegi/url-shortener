@@ -4259,6 +4259,8 @@ async function handleApi(request, env, url) {
     };
     const orderBy = visitorSort[url.searchParams.get('sort')] || visitorSort.last_desc;
     const q = (url.searchParams.get('q') || '').trim();
+    // v10.8: favorites-only view — composes with sort + search.
+    const favoritesOnly = url.searchParams.get('favorites') === '1';
     // v10.7: favorites (and their user mappings) are exempt from the
     // inactivity prune on read, same as in recordVisit.
     await env.DB.prepare(
@@ -4267,21 +4269,22 @@ async function handleApi(request, env, url) {
     await env.DB.prepare(
       'DELETE FROM visitor_users WHERE last_seen < ? AND ip NOT IN (SELECT ip FROM visitors WHERE COALESCE(is_favorite, 0) = 1)',
     ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
-    let rows;
+    let where = '';
+    const binds = [];
+    if (favoritesOnly) where = 'WHERE COALESCE(is_favorite, 0) = 1';
     if (q) {
       const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
-      rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note, is_favorite FROM visitors ' +
-        'WHERE ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\' OR language LIKE ? ESCAPE \'\\\' OR referrer LIKE ? ESCAPE \'\\\' OR note LIKE ? ESCAPE \'\\\' ORDER BY ' + orderBy + ' LIMIT ?',
-      ).bind(like, like, like, like, like, like, like, like, like, like, like, CONFIG.maxVisitorsList).all();
-    } else {
-      rows = await env.DB.prepare(
-        'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note, is_favorite FROM visitors ' +
-        'ORDER BY ' + orderBy + ' LIMIT ?',
-      ).bind(CONFIG.maxVisitorsList).all();
+      const likeClause = '(ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\' OR language LIKE ? ESCAPE \'\\\' OR referrer LIKE ? ESCAPE \'\\\' OR note LIKE ? ESCAPE \'\\\')';
+      where += (where ? ' AND ' : 'WHERE ') + likeClause;
+      for (let i = 0; i < 11; i++) binds.push(like);
     }
+    binds.push(CONFIG.maxVisitorsList);
+    const rows = await env.DB.prepare(
+      'SELECT ip, visits, first_seen, last_seen, last_path, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, note, is_favorite FROM visitors ' +
+      (where ? where + ' ' : '') + 'ORDER BY ' + orderBy + ' LIMIT ?',
+    ).bind(...binds).all();
     const totals = await env.DB.prepare(
-      'SELECT COUNT(*) AS c, COALESCE(SUM(visits), 0) AS s FROM visitors',
+      'SELECT COUNT(*) AS c, COALESCE(SUM(visits), 0) AS s, COALESCE(SUM(CASE WHEN COALESCE(is_favorite, 0) = 1 THEN 1 ELSE 0 END), 0) AS f FROM visitors',
     ).first();
     // v10.2: usernames seen from each IP (logged-in visits only).
     const userRows = await env.DB.prepare(
@@ -4321,6 +4324,7 @@ async function handleApi(request, env, url) {
       })),
       totalDevices: totals ? totals.c : 0,
       totalVisits: totals ? totals.s : 0,
+      totalFavorites: totals ? totals.f : 0,
     });
   }
   // --- v10.4: admin note on a visitor IP (admin only) ------------------
