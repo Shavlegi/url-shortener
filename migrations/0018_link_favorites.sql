@@ -1,0 +1,16 @@
+-- 0018_link_favorites.sql — Mini Link v10.10: link favorites (admin-only)
+-- Applied with: wrangler d1 migrations apply mini-link-db --remote
+-- (or once, in the Cloudflare dashboard: D1 -> your database -> Console)
+--
+-- NOTE: the Worker ALSO self-applies this schema lazily (see
+-- ensureV18Schema in src/index.js, with a duplicate-column-tolerant
+-- ALTER). That is what applies it on the live database. This file
+-- exists for fresh installs and for `wrangler d1 migrations apply`.
+--
+-- `links.is_favorite` marks a link the admin saved as a favorite, to
+-- control separately in a favorites-only view (`GET /api/links?
+-- favorites=1`). Works on every link — custom-alias and auto-alias
+-- alike. Links are never auto-deleted, so no exemption logic is
+-- needed: deleting the link removes the favorite with it. Public and
+-- user endpoints never expose the favorite state.
+ALTER TABLE links ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;

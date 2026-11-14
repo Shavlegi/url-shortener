@@ -1346,6 +1346,41 @@ async function ensureV17Schema(env) {
   }
 }
 
+let v18SchemaChecked = false;
+
+// v10.10: link favorites (admin-only). `links.is_favorite` marks a link
+// the admin saved to control separately in a favorites-only view.
+// Works on every link — custom and auto-alias alike. Links are never
+// auto-deleted, so no exemption logic is needed: deleting the link
+// removes the favorite with it.
+async function ensureV18Schema(env) {
+  if (v18SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v18_link_favorites'",
+    ).first();
+    if (flag && flag.value === '18') {
+      v18SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await addColumnIfMissing(env, 'ALTER TABLE links ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0');
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v18_link_favorites', '18')",
+    ).run();
+    v18SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v18 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — the limiter itself   */
 /* never stores raw IPs; visitor IPs live only in the v10 visitors    */
@@ -1592,6 +1627,10 @@ function linkRowToJson(request, row) {
     isCustom: row.is_custom === 1,
     trackServer: row.track_server === 1,
     trackBrowser: row.track_browser === 1,
+    // v10.10: admin-only favorite marker. Queries that don't select
+    // the column (public/user endpoints) get false — favorite state
+    // never leaks outside the admin panel.
+    isFavorite: row.is_favorite === 1,
   };
 }
 
@@ -3304,6 +3343,8 @@ async function handleApi(request, env, url) {
   await ensureV16Schema(env);
   // v10.9 schema (links is_custom/track flags + link_visits) — same lazy pattern, see ensureV17Schema.
   await ensureV17Schema(env);
+  // v10.10 schema (links is_favorite) — same lazy pattern, see ensureV18Schema.
+  await ensureV18Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -4391,27 +4432,33 @@ async function handleApi(request, env, url) {
 
   // --- List links ------------------------------------------------------
   // v2: each row also carries its owner (username, or null = anonymous).
+  // v10.10: `favorites=1` returns only favorited rows; composes with
+  // sort + search. The envelope carries totalLinks/totalFavorites for
+  // the totals line (mirrors the v10.8 visitors favorites view).
   if (path === '/api/links' && method === 'GET') {
     const search = (url.searchParams.get('search') || '').trim();
     const linkSort = { newest: 'l.created_at DESC', oldest: 'l.created_at ASC', clicks_desc: 'l.clicks DESC, l.created_at DESC', clicks_asc: 'l.clicks ASC, l.created_at DESC' };
     const linkOrder = linkSort[url.searchParams.get('sort')] || linkSort.newest;
-    let rows;
+    const favoritesOnly = url.searchParams.get('favorites') === '1';
+    const conditions = [];
+    const binds = [];
+    if (favoritesOnly) conditions.push('COALESCE(l.is_favorite, 0) = 1');
     if (search) {
       const like = '%' + search.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
-      rows = await env.DB.prepare(
-        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, l.is_custom, l.track_server, l.track_browser, u.username AS owner ' +
-        'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
-        'WHERE l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' OR l.note LIKE ? ESCAPE \'\\\' ' +
-        'ORDER BY ' + linkOrder + ' LIMIT ?',
-      ).bind(like, like, like, CONFIG.maxLinksList).all();
-    } else {
-      rows = await env.DB.prepare(
-        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, l.is_custom, l.track_server, l.track_browser, u.username AS owner ' +
-        'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
-        'ORDER BY ' + linkOrder + ' LIMIT ?',
-      ).bind(CONFIG.maxLinksList).all();
+      conditions.push('(l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' OR l.note LIKE ? ESCAPE \'\\\')');
+      binds.push(like, like, like);
     }
-    return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)) });
+    binds.push(CONFIG.maxLinksList);
+    const rows = await env.DB.prepare(
+      'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, l.is_custom, l.track_server, l.track_browser, l.is_favorite, u.username AS owner ' +
+      'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
+      (conditions.length ? 'WHERE ' + conditions.join(' AND ') + ' ' : '') +
+      'ORDER BY ' + linkOrder + ' LIMIT ?',
+    ).bind(...binds).all();
+    const totals = await env.DB.prepare(
+      'SELECT COUNT(*) AS c, COALESCE(SUM(CASE WHEN COALESCE(is_favorite, 0) = 1 THEN 1 ELSE 0 END), 0) AS f FROM links',
+    ).first();
+    return json({ links: (rows.results || []).map((r) => linkRowToJson(request, r)), totalLinks: totals ? totals.c : 0, totalFavorites: totals ? totals.f : 0 });
   }
 
   // --- v5 (admin): all users' QR favorites -----------------------------
@@ -4510,7 +4557,7 @@ async function handleApi(request, env, url) {
     }
 
     const row = await env.DB.prepare(
-      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note, is_custom, track_server, track_browser FROM links WHERE alias = ?',
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note, is_custom, track_server, track_browser, is_favorite FROM links WHERE alias = ?',
     ).bind(finalAlias).first();
     return json({ link: linkRowToJson(request, row) }, 201);
   }
@@ -4579,6 +4626,28 @@ async function handleApi(request, env, url) {
       'UPDATE links SET track_server = ?, track_browser = ? WHERE id = ?',
     ).bind(newServer ? 1 : 0, newBrowser ? 1 : 0, id).run();
     return json({ ok: true, id: link.id, alias: link.alias, trackServer: newServer, trackBrowser: newBrowser });
+  }
+
+  // --- v10.10: link favorite toggle (admin only, ALL links) ---------
+  // Unlike tracking, favorites work on every link — custom-alias and
+  // auto-alias alike. Links are never auto-deleted, so no exemption
+  // logic is needed: deleting the link removes the favorite with it.
+  const linkFavoriteMatch = path.match(/^\/api\/admin\/links\/(\d+)\/favorite$/);
+  if (linkFavoriteMatch) {
+    if (method !== 'PATCH') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    if (typeof parsed.body.favorite !== 'boolean') return error('ფავორიტის მნიშვნელობა არასწორია.', 400);
+    const id = parseInt(linkFavoriteMatch[1], 10);
+    const link = await env.DB.prepare(
+      'SELECT id, alias FROM links WHERE id = ?',
+    ).bind(id).first();
+    if (!link) return error('ბმული არ მოიძებნა.', 404);
+    await env.DB.prepare(
+      'UPDATE links SET is_favorite = ? WHERE id = ?',
+    ).bind(parsed.body.favorite ? 1 : 0, id).run();
+    return json({ ok: true, id: link.id, alias: link.alias, favorite: parsed.body.favorite });
   }
 
   // --- v10.9: click log of one link (admin only) ----------------------
@@ -4708,7 +4777,7 @@ async function handleApi(request, env, url) {
         return error('ბმული არ მოიძებნა.', 404);
       }
       const row = await env.DB.prepare(
-        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note, is_custom, track_server, track_browser FROM links WHERE id = ?',
+        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note, is_custom, track_server, track_browser, is_favorite FROM links WHERE id = ?',
       ).bind(id).first();
       return json({ link: linkRowToJson(request, row) });
     }

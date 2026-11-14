@@ -188,6 +188,11 @@ try {
 
 /* ---------------- Links ---------------- */
 
+// v10.10: link favorites — favorites-only view flag + totals, mirroring
+// the v10.8 visitors favorites view.
+let linksFavoritesOnly = false;
+let linkTotals = { totalLinks: 0, totalFavorites: 0 };
+
 async function loadLinks() {
   const err = $('links-error');
   hideError(err);
@@ -196,10 +201,12 @@ async function loadLinks() {
   const params = new URLSearchParams();
   if (q) params.set('search', q);
   if (sort && sort !== 'newest') params.set('sort', sort);
+  if (linksFavoritesOnly) params.set('favorites', '1');
   const qs = params.toString();
   try {
     const data = await api('/api/links' + (qs ? ('?' + qs) : ''));
     links = data.links || [];
+    linkTotals = { totalLinks: data.totalLinks || 0, totalFavorites: data.totalFavorites || 0 };
     renderLinks();
   } catch (e) {
     showError(err, e.message || 'ბმულების ჩატვირთვა ვერ მოხერხდა.');
@@ -209,7 +216,10 @@ async function loadLinks() {
 function renderLinks() {
   const list = $('links-list');
   list.innerHTML = '';
+  $('links-totals').textContent = 'სულ ' + linkTotals.totalLinks + ' ბმული · ⭐ ფავორიტი: ' + linkTotals.totalFavorites;
+  const q = ($('search-input').value || '').trim();
   $('links-empty').hidden = links.length !== 0;
+  $('links-empty').textContent = q ? 'ბმული ვერ მოიძებნა.' : (linksFavoritesOnly ? 'ფავორიტები ჯერ არ არის.' : 'ბმულები ჯერ არ გაქვთ.');
   for (const link of links) {
     list.appendChild(linkCard(link));
   }
@@ -302,6 +312,13 @@ function linkCard(link) {
   else if (isExpired(link)) { badge.className = 'badge expired'; badge.textContent = 'ვადაგასული'; }
   else { badge.className = 'badge on'; badge.textContent = 'აქტიური'; }
   top.appendChild(badge);
+  // v10.10: favorite badge — admin-only marker, same pill as the QR ★.
+  if (link.isFavorite) {
+    const favBadge = document.createElement('span');
+    favBadge.className = 'badge fav';
+    favBadge.textContent = '⭐ ფავორიტი';
+    top.appendChild(favBadge);
+  }
   card.appendChild(top);
 
   const dest = document.createElement('p');
@@ -377,6 +394,23 @@ function linkCard(link) {
   });
   actions.appendChild(delBtn);
 
+  // v10.10: favorite toggle — every link, custom and auto-alias alike.
+  // No confirm: fully reversible, like the visitors favorite button.
+  const favBtn = document.createElement('button');
+  favBtn.className = 'btn small';
+  favBtn.textContent = link.isFavorite ? '★ ფავორიტებიდან მოხსნა' : '⭐ ფავორიტებში';
+  favBtn.addEventListener('click', async () => {
+    try {
+      await api('/api/admin/links/' + link.id + '/favorite', {
+        method: 'PATCH',
+        body: JSON.stringify({ favorite: !link.isFavorite }),
+      });
+      toast(link.isFavorite ? 'ფავორიტებიდან მოიხსნა' : 'ფავორიტებში დაემატა');
+      loadLinks();
+    } catch (e) { toast(e.message || 'შეცდომა'); }
+  });
+  actions.appendChild(favBtn);
+
   card.appendChild(actions);
 
   // v10.9: per-link tracking toggles — custom-alias links ONLY. The
@@ -401,6 +435,13 @@ function linkCard(link) {
     });
     trackActions.appendChild(serverBtn);
 
+    // v10.10: explicit on/off label beside the button — the glow alone
+    // was not clear enough. Refreshed by the refetch after a toggle.
+    const serverLabel = document.createElement('span');
+    serverLabel.className = 'badge' + (link.trackServer ? ' on' : ' muted');
+    serverLabel.textContent = link.trackServer ? 'ჩართულია' : 'გამორთულია';
+    trackActions.appendChild(serverLabel);
+
     const browserBtn = document.createElement('button');
     browserBtn.className = 'btn small' + (link.trackBrowser ? ' primary' : '');
     browserBtn.textContent = '🔍 ბრაუზერი';
@@ -415,6 +456,11 @@ function linkCard(link) {
       } catch (e) { toast(e.message || 'შეცდომა'); }
     });
     trackActions.appendChild(browserBtn);
+
+    const browserLabel = document.createElement('span');
+    browserLabel.className = 'badge' + (link.trackBrowser ? ' on' : ' muted');
+    browserLabel.textContent = link.trackBrowser ? 'ჩართულია' : 'გამორთულია';
+    trackActions.appendChild(browserLabel);
 
     const logBtn = document.createElement('button');
     logBtn.className = 'btn small';
@@ -435,6 +481,13 @@ $('search-input').addEventListener('input', () => {
   searchTimer = setTimeout(loadLinks, 350);
 });
 $('links-sort-select').addEventListener('change', loadLinks);
+// v10.10: favorites-only toggle — refetches the list with favorites=1;
+// the search + sort controls keep working on the filtered set.
+$('links-favorites-toggle-btn').addEventListener('click', () => {
+  linksFavoritesOnly = !linksFavoritesOnly;
+  $('links-favorites-toggle-btn').classList.toggle('primary', linksFavoritesOnly);
+  loadLinks();
+});
 
 /* ---------------- Link tracking log (v10.9) ---------------- */
 // Dedicated per-link click log: a sub-view of the links tab, NOT a
