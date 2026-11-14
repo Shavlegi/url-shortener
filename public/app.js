@@ -413,17 +413,31 @@ function linkCard(link) {
 
   card.appendChild(actions);
 
-  // v10.9: per-link tracking toggles — custom-alias links ONLY. The
-  // list is refetched after a toggle so the server-side auto-enable /
-  // auto-disable rules (browser implies server) are reflected.
+  // v10.9/v10.12: per-link tracking switches — custom-alias links
+  // ONLY. v10.12 replaced the toggle buttons + state pills with the
+  // same sliding pill switches as the create form (v10.11); the
+  // PATCH-call logic below is unchanged. The list is refetched after
+  // a toggle so the server-side auto-enable / auto-disable rules
+  // (browser implies server) are reflected in both switches.
   if (link.isCustom) {
-    const trackActions = document.createElement('div');
-    trackActions.className = 'link-actions';
+    const trackSwitches = document.createElement('div');
 
-    const serverBtn = document.createElement('button');
-    serverBtn.className = 'btn small' + (link.trackServer ? ' primary' : '');
-    serverBtn.textContent = '👁 თვალთვალი';
-    serverBtn.addEventListener('click', async () => {
+    const serverRow = document.createElement('div');
+    serverRow.className = 'switch-row';
+    const serverSwitchLabel = document.createElement('span');
+    serverSwitchLabel.className = 'switch-label';
+    serverSwitchLabel.textContent = '👁 თვალთვალი';
+    serverRow.appendChild(serverSwitchLabel);
+    const serverSwitch = document.createElement('button');
+    serverSwitch.type = 'button';
+    serverSwitch.className = 'switch' + (link.trackServer ? ' on' : '');
+    serverSwitch.setAttribute('role', 'switch');
+    serverSwitch.setAttribute('aria-checked', link.trackServer ? 'true' : 'false');
+    serverSwitch.setAttribute('aria-label', 'სერვერის თვალთვალი');
+    const serverKnob = document.createElement('span');
+    serverKnob.className = 'switch-knob';
+    serverSwitch.appendChild(serverKnob);
+    serverSwitch.addEventListener('click', async () => {
       try {
         await api('/api/admin/links/' + link.id + '/tracking', {
           method: 'PATCH',
@@ -433,19 +447,25 @@ function linkCard(link) {
         loadLinks();
       } catch (e) { toast(e.message || 'შეცდომა'); }
     });
-    trackActions.appendChild(serverBtn);
+    serverRow.appendChild(serverSwitch);
+    trackSwitches.appendChild(serverRow);
 
-    // v10.10: explicit on/off label beside the button — the glow alone
-    // was not clear enough. Refreshed by the refetch after a toggle.
-    const serverLabel = document.createElement('span');
-    serverLabel.className = 'badge' + (link.trackServer ? ' on' : ' muted');
-    serverLabel.textContent = link.trackServer ? 'ჩართულია' : 'გამორთულია';
-    trackActions.appendChild(serverLabel);
-
-    const browserBtn = document.createElement('button');
-    browserBtn.className = 'btn small' + (link.trackBrowser ? ' primary' : '');
-    browserBtn.textContent = '🔍 ბრაუზერი';
-    browserBtn.addEventListener('click', async () => {
+    const browserRow = document.createElement('div');
+    browserRow.className = 'switch-row';
+    const browserSwitchLabel = document.createElement('span');
+    browserSwitchLabel.className = 'switch-label';
+    browserSwitchLabel.textContent = '🔍 ბრაუზერი';
+    browserRow.appendChild(browserSwitchLabel);
+    const browserSwitch = document.createElement('button');
+    browserSwitch.type = 'button';
+    browserSwitch.className = 'switch' + (link.trackBrowser ? ' on' : '');
+    browserSwitch.setAttribute('role', 'switch');
+    browserSwitch.setAttribute('aria-checked', link.trackBrowser ? 'true' : 'false');
+    browserSwitch.setAttribute('aria-label', 'ბრაუზერის თვალთვალი');
+    const browserKnob = document.createElement('span');
+    browserKnob.className = 'switch-knob';
+    browserSwitch.appendChild(browserKnob);
+    browserSwitch.addEventListener('click', async () => {
       try {
         await api('/api/admin/links/' + link.id + '/tracking', {
           method: 'PATCH',
@@ -455,12 +475,13 @@ function linkCard(link) {
         loadLinks();
       } catch (e) { toast(e.message || 'შეცდომა'); }
     });
-    trackActions.appendChild(browserBtn);
+    browserRow.appendChild(browserSwitch);
+    trackSwitches.appendChild(browserRow);
 
-    const browserLabel = document.createElement('span');
-    browserLabel.className = 'badge' + (link.trackBrowser ? ' on' : ' muted');
-    browserLabel.textContent = link.trackBrowser ? 'ჩართულია' : 'გამორთულია';
-    trackActions.appendChild(browserLabel);
+    card.appendChild(trackSwitches);
+
+    const trackActions = document.createElement('div');
+    trackActions.className = 'link-actions';
 
     const logBtn = document.createElement('button');
     logBtn.className = 'btn small';
