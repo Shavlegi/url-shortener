@@ -1988,10 +1988,43 @@ async function loadScreenStats() {
 
 /* ---------------- Create link ---------------- */
 
+// v10.11: ON/OFF tracking switches in the create form. Shown only while
+// a custom alias is typed (tracking applies to custom links only); the
+// v10.9 coupling is mirrored here — turning browser tracking ON also
+// turns server tracking ON, turning server tracking OFF also turns
+// browser tracking OFF.
+function setSwitch(btn, on) {
+  btn.setAttribute('aria-checked', on ? 'true' : 'false');
+  btn.classList.toggle('on', on);
+}
+function isSwitchOn(btn) {
+  return btn.getAttribute('aria-checked') === 'true';
+}
+function updateCreateTrackingSwitches(aliasValue) {
+  const box = $('create-tracking-switches');
+  const show = !!aliasValue;
+  box.hidden = !show;
+  if (!show) {
+    setSwitch($('create-track-server'), false);
+    setSwitch($('create-track-browser'), false);
+  }
+}
+$('create-track-server').addEventListener('click', () => {
+  const on = !isSwitchOn($('create-track-server'));
+  setSwitch($('create-track-server'), on);
+  if (!on) setSwitch($('create-track-browser'), false);
+});
+$('create-track-browser').addEventListener('click', () => {
+  const on = !isSwitchOn($('create-track-browser'));
+  setSwitch($('create-track-browser'), on);
+  if (on) setSwitch($('create-track-server'), true);
+});
+
 let aliasTimer = null;
 $('alias-input').addEventListener('input', () => {
   const hint = $('alias-hint');
   const value = $('alias-input').value.trim();
+  updateCreateTrackingSwitches(value);
   hint.textContent = '';
   hint.className = 'hint';
   if (!value) return;
@@ -2026,9 +2059,16 @@ $('create-form').addEventListener('submit', async (e) => {
   }
 
   try {
+    // v10.11: the tracking flags ride along only when a custom alias is
+    // set — when the switches are hidden, nothing is sent.
+    const createBody = { destination, alias: alias || undefined, note: note || undefined, expiresAt };
+    if (alias) {
+      createBody.trackServer = isSwitchOn($('create-track-server'));
+      createBody.trackBrowser = isSwitchOn($('create-track-browser'));
+    }
     const data = await api('/api/links', {
       method: 'POST',
-      body: JSON.stringify({ destination, alias: alias || undefined, note: note || undefined, expiresAt }),
+      body: JSON.stringify(createBody),
     });
     const link = data.link;
     const a = $('result-link');
@@ -2045,6 +2085,7 @@ $('create-form').addEventListener('submit', async (e) => {
     $('note-input').value = '';
     $('expiry-input').value = '';
     $('alias-hint').textContent = '';
+    updateCreateTrackingSwitches(''); // switches OFF + hidden again
     toast('ბმული შეიქმნა');
     loadLinks();
   } catch (e2) {

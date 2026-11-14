@@ -68,6 +68,18 @@
           <span>შენიშვნა <small>(არასავალდებულო)</small></span>
           <input id="note-input" type="text" autocomplete="off" placeholder="მაგ. CV, მაღაზია" maxlength="100">
         </label>
+        <!-- v10.11: ON/OFF tracking switches — shown only while a custom
+             alias is typed (tracking applies to custom links only). -->
+        <div id="create-tracking-switches" class="create-tracking-switches" hidden>
+          <div class="switch-row">
+            <span class="switch-label">👁 თვალთვალი</span>
+            <button type="button" id="create-track-server" class="switch" role="switch" aria-checked="false" aria-label="სერვერის თვალთვალი"><span class="switch-knob"></span></button>
+          </div>
+          <div class="switch-row">
+            <span class="switch-label">🔍 ბრაუზერი</span>
+            <button type="button" id="create-track-browser" class="switch" role="switch" aria-checked="false" aria-label="ბრაუზერის თვალთვალი"><span class="switch-knob"></span></button>
+          </div>
+        </div>
         <button type="submit" class="btn primary" id="create-btn">შეამოკლე</button>
         <p id="create-error" class="error" hidden></p>
       </form>

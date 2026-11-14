@@ -434,3 +434,34 @@ input:disabled { opacity: 0.55; }
 }
 
 /* v8.9 trigger: glow pill everywhere — deployed after the 2026-11-13 git relink. */
+
+/* v10.11: ON/OFF toggle switches in the admin create form — sliding pill
+   switch (rounded track + sliding knob) in the lilac-black theme: lilac
+   glow when ON, muted grey when OFF. Rows are 48px tall for mobile taps. */
+.create-tracking-switches { margin-bottom: 12px; }
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 6px 2px; border-top: 1px solid var(--border); }
+.switch-row:last-child { border-bottom: 1px solid var(--border); }
+.switch-label { font-weight: 600; font-size: 0.95rem; }
+.switch {
+  -webkit-appearance: none; appearance: none;
+  flex: none; position: relative;
+  width: 58px; height: 32px; padding: 0;
+  border: 1px solid var(--border-strong); border-radius: 999px;
+  background: rgba(255, 255, 255, 0.10);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.switch-knob {
+  position: absolute; top: 3px; left: 3px;
+  width: 24px; height: 24px; border-radius: 50%;
+  background: #e9e4f5;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+.switch.on {
+  background: linear-gradient(135deg, var(--primary-2), var(--primary));
+  border-color: rgba(216, 180, 254, 0.6);
+  box-shadow: 0 0 16px rgba(168, 85, 247, 0.55);
+}
+.switch.on .switch-knob { transform: translateX(26px); background: #ffffff; }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

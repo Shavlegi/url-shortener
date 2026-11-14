@@ -1564,6 +1564,16 @@ function validateNote(raw) {
   return { ok: true, note: note === '' ? null : note };
 }
 
+// v10.9/v10.11: the tracking coupling rule, shared by the create
+// handler and the tracking PATCH handler. Browser tracking needs the
+// server log to attach to: turning it on also turns server tracking
+// on; turning server tracking off also turns browser tracking off.
+function coerceTrackingFlags(server, browser) {
+  if (browser) server = true;
+  if (!server) browser = false;
+  return { server, browser };
+}
+
 async function insertAutoLink(env, destination, expiresMs, userId = null, note = null) {
   for (let attempt = 0; attempt < 5; attempt++) {
     const candidate = generateAlias();
@@ -4524,6 +4534,15 @@ async function handleApi(request, env, url) {
     if (!v.ok) return error(v.reason, 400);
     const nv = validateNote(parsed.body.note);
     if (!nv.ok) return error(nv.reason, 400);
+    // v10.11: optional tracking flags from the create form's ON/OFF
+    // switches. Validated like the tracking PATCH handler; applied
+    // ONLY to custom-alias links below — auto-alias creation ignores
+    // them (the columns stay at their 0 defaults).
+    const hasServer = parsed.body.trackServer !== undefined;
+    const hasBrowser = parsed.body.trackBrowser !== undefined;
+    if (hasServer && typeof parsed.body.trackServer !== 'boolean') return error('სერვერის თვალთვალის მნიშვნელობა არასწორია.', 400);
+    if (hasBrowser && typeof parsed.body.trackBrowser !== 'boolean') return error('ბრაუზერის თვალთვალის მნიშვნელობა არასწორია.', 400);
+    const createFlags = coerceTrackingFlags(hasServer ? parsed.body.trackServer : false, hasBrowser ? parsed.body.trackBrowser : false);
 
     let expiresMs = null;
     if (expiresAt !== undefined && expiresAt !== null && expiresAt !== '') {
@@ -4540,9 +4559,9 @@ async function handleApi(request, env, url) {
       finalAlias = av.alias;
       try {
         const ins = await env.DB.prepare(
-          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id, note, is_custom) ' +
-          'VALUES (?, ?, ?, ?, 1, 0, NULL, ?, 1)',
-        ).bind(finalAlias, v.url, Date.now(), expiresMs, nv.note).run();
+          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id, note, is_custom, track_server, track_browser) ' +
+          'VALUES (?, ?, ?, ?, 1, 0, NULL, ?, 1, ?, ?)',
+        ).bind(finalAlias, v.url, Date.now(), expiresMs, nv.note, createFlags.server ? 1 : 0, createFlags.browser ? 1 : 0).run();
         if (!ins.success) return error('ბმულის შექმნა ვერ მოხერხდა.', 500);
       } catch (e) {
         if (String(e && e.message ? e.message : e).includes('UNIQUE')) {
@@ -4618,10 +4637,12 @@ async function handleApi(request, env, url) {
     ).bind(id).first();
     if (!link) return error('ბმული არ მოიძებნა.', 404);
     if (link.is_custom !== 1) return error('თვალთვალი მხოლოდ custom ბმულებზე შეიძლება.', 400);
-    let newServer = hasServer ? parsed.body.trackServer : link.track_server === 1;
-    let newBrowser = hasBrowser ? parsed.body.trackBrowser : link.track_browser === 1;
-    if (newBrowser) newServer = true;
-    if (!newServer) newBrowser = false;
+    const coerced = coerceTrackingFlags(
+      hasServer ? parsed.body.trackServer : link.track_server === 1,
+      hasBrowser ? parsed.body.trackBrowser : link.track_browser === 1,
+    );
+    const newServer = coerced.server;
+    const newBrowser = coerced.browser;
     await env.DB.prepare(
       'UPDATE links SET track_server = ?, track_browser = ? WHERE id = ?',
     ).bind(newServer ? 1 : 0, newBrowser ? 1 : 0, id).run();
