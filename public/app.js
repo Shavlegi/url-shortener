@@ -145,6 +145,9 @@ let activityPeriod = 'today';
 function showTab(name) {
   if (!TABS.includes(name)) name = 'links';
   currentTab = name;
+  // v10.9: the per-link log is a sub-view, not a tab — always hidden
+  // when switching tabs.
+  $('section-link-log').hidden = true;
   for (const t of TABS) {
     $('section-' + t).hidden = t !== name;
     $('tabbtn-' + t).classList.toggle('active', t === name);
@@ -375,6 +378,53 @@ function linkCard(link) {
   actions.appendChild(delBtn);
 
   card.appendChild(actions);
+
+  // v10.9: per-link tracking toggles — custom-alias links ONLY. The
+  // list is refetched after a toggle so the server-side auto-enable /
+  // auto-disable rules (browser implies server) are reflected.
+  if (link.isCustom) {
+    const trackActions = document.createElement('div');
+    trackActions.className = 'link-actions';
+
+    const serverBtn = document.createElement('button');
+    serverBtn.className = 'btn small' + (link.trackServer ? ' primary' : '');
+    serverBtn.textContent = '👁 თვალთვალი';
+    serverBtn.addEventListener('click', async () => {
+      try {
+        await api('/api/admin/links/' + link.id + '/tracking', {
+          method: 'PATCH',
+          body: JSON.stringify({ trackServer: !link.trackServer }),
+        });
+        toast(link.trackServer ? 'სერვერის თვალთვალი გამორთულია' : 'სერვერის თვალთვალი ჩართულია');
+        loadLinks();
+      } catch (e) { toast(e.message || 'შეცდომა'); }
+    });
+    trackActions.appendChild(serverBtn);
+
+    const browserBtn = document.createElement('button');
+    browserBtn.className = 'btn small' + (link.trackBrowser ? ' primary' : '');
+    browserBtn.textContent = '🔍 ბრაუზერი';
+    browserBtn.addEventListener('click', async () => {
+      try {
+        await api('/api/admin/links/' + link.id + '/tracking', {
+          method: 'PATCH',
+          body: JSON.stringify({ trackBrowser: !link.trackBrowser }),
+        });
+        toast(link.trackBrowser ? 'ბრაუზერის თვალთვალი გამორთულია' : 'ბრაუზერის თვალთვალი ჩართულია');
+        loadLinks();
+      } catch (e) { toast(e.message || 'შეცდომა'); }
+    });
+    trackActions.appendChild(browserBtn);
+
+    const logBtn = document.createElement('button');
+    logBtn.className = 'btn small';
+    logBtn.textContent = '📊 ჟურნალი';
+    logBtn.addEventListener('click', () => openLinkLog(link));
+    trackActions.appendChild(logBtn);
+
+    card.appendChild(trackActions);
+  }
+
   card.appendChild(shareButtons(link));
   return card;
 }
@@ -385,6 +435,180 @@ $('search-input').addEventListener('input', () => {
   searchTimer = setTimeout(loadLinks, 350);
 });
 $('links-sort-select').addEventListener('change', loadLinks);
+
+/* ---------------- Link tracking log (v10.9) ---------------- */
+// Dedicated per-link click log: a sub-view of the links tab, NOT a
+// TABS entry. showTab() hides it; the back button returns to links.
+let currentLogLink = null;
+let logVisits = [];
+let logTotal = 0;
+let logOffset = 0;
+const LOG_PAGE_SIZE = 50;
+
+function openLinkLog(link) {
+  currentLogLink = link;
+  logOffset = 0;
+  logVisits = [];
+  $('link-log-search-input').value = '';
+  for (const t of TABS) $('section-' + t).hidden = true;
+  $('section-link-log').hidden = false;
+  $('link-log-summary').textContent = link.shortUrl.replace(/^https?:\/\//, '') + ' → ' + link.destination +
+    ' · 👁 თვალთვალი: ' + (link.trackServer ? 'ჩართული' : 'გამორთული') +
+    ' · 🔍 ბრაუზერი: ' + (link.trackBrowser ? 'ჩართული' : 'გამორთული');
+  loadLogVisits(false);
+  $('section-link-log').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function loadLogVisits(append) {
+  if (!currentLogLink) return;
+  const err = $('link-log-error');
+  hideError(err);
+  if (!append) { logOffset = 0; logVisits = []; }
+  const q = $('link-log-search-input').value.trim();
+  const params = new URLSearchParams();
+  params.set('limit', String(LOG_PAGE_SIZE));
+  params.set('offset', String(logOffset));
+  if (q) params.set('q', q);
+  try {
+    const data = await api('/api/admin/links/' + currentLogLink.id + '/visits?' + params.toString());
+    logTotal = data.total || 0;
+    logVisits = append ? logVisits.concat(data.visits || []) : (data.visits || []);
+    logOffset = logVisits.length;
+    renderLogVisits();
+  } catch (e) {
+    showError(err, e.message || 'ჟურნალის ჩატვირთვა ვერ მოხერხდა.');
+  }
+}
+
+function renderLogVisits() {
+  const list = $('link-log-list');
+  list.innerHTML = '';
+  $('link-log-totals').textContent = 'სულ ' + logTotal + ' ჩაწერილი დაჭერა';
+  const q = ($('link-log-search-input').value || '').trim();
+  $('link-log-empty').hidden = logVisits.length !== 0;
+  $('link-log-empty').textContent = q ? 'ჩანაწერი ვერ მოიძებნა.' : 'დაჭერები ჯერ არ არის.';
+  for (const v of logVisits) {
+    list.appendChild(linkVisitCard(v));
+  }
+  $('link-log-more-btn').hidden = logVisits.length >= logTotal;
+}
+
+function linkVisitCard(v) {
+  const card = document.createElement('div');
+  card.className = 'link-card';
+
+  const top = document.createElement('div');
+  top.className = 'link-top';
+  const ip = document.createElement('span');
+  ip.className = 'link-alias';
+  ip.textContent = v.ip;
+  top.appendChild(ip);
+  card.appendChild(top);
+
+  const meta = document.createElement('p');
+  meta.className = 'link-meta';
+  meta.textContent = fmtDate(v.visitedAt);
+  card.appendChild(meta);
+
+  const geoParts = [];
+  if (v.country) geoParts.push(v.country === 'T1' ? '🧅 Tor' : v.country);
+  if (v.city) geoParts.push(v.city);
+  if (v.region && v.region !== v.city) geoParts.push(v.region);
+  if (v.postalCode) geoParts.push(v.postalCode);
+  if (v.latitude !== null && v.latitude !== undefined && v.longitude !== null && v.longitude !== undefined) {
+    geoParts.push(Number(v.latitude).toFixed(2) + ', ' + Number(v.longitude).toFixed(2));
+  }
+  if (v.timezone) geoParts.push(v.timezone);
+  if (v.isp) geoParts.push(v.isp + (v.asn !== null && v.asn !== undefined ? ' (AS' + v.asn + ')' : ''));
+  if (v.isEu) geoParts.push('EU');
+  if (geoParts.length > 0) {
+    const geoEl = document.createElement('p');
+    geoEl.className = 'link-meta';
+    geoEl.textContent = '🌍 ' + geoParts.join(' · ');
+    card.appendChild(geoEl);
+  }
+
+  const devParts = [];
+  if (v.os) devParts.push(v.os);
+  if (v.browser) devParts.push(v.browser);
+  if (v.device) devParts.push(v.device === 'mobile' ? 'მობილური' : v.device === 'tablet' ? 'პლანშეტი' : 'კომპიუტერი');
+  if (devParts.length > 0) {
+    const devEl = document.createElement('p');
+    devEl.className = 'link-meta';
+    devEl.textContent = '📱 ' + devParts.join(' · ');
+    card.appendChild(devEl);
+  }
+
+  const miscParts = [];
+  if (v.language) miscParts.push('🔤 ' + v.language);
+  if (v.referrer) miscParts.push('🔗 ' + v.referrer);
+  if (miscParts.length > 0) {
+    const miscEl = document.createElement('p');
+    miscEl.className = 'link-meta';
+    miscEl.textContent = miscParts.join(' · ');
+    card.appendChild(miscEl);
+  }
+
+  if (v.browserData) {
+    const b = v.browserData;
+    const bParts = [];
+    if (b.screen) bParts.push('ეკრანი: ' + b.screen + (b.refreshRate ? ' @ ' + b.refreshRate + 'Hz' : ''));
+    if (b.gpu) bParts.push('GPU: ' + b.gpu);
+    if (b.orientation) bParts.push('ორიენტაცია: ' + b.orientation);
+    if (b.colorScheme) bParts.push('თემა: ' + (b.colorScheme === 'dark' ? 'მუქი' : 'ღია'));
+    if (b.touchPoints !== null && b.touchPoints !== undefined) bParts.push('შეხება: ' + b.touchPoints);
+    if (b.incognito !== null && b.incognito !== undefined) bParts.push('ინკოგნიტო: ' + (b.incognito ? 'კი' : 'არა'));
+    if (b.adblock !== null && b.adblock !== undefined) bParts.push('რეკლამის ბლოკერი: ' + (b.adblock ? 'კი' : 'არა'));
+    if (b.batteryLevel !== null && b.batteryLevel !== undefined) bParts.push('ბატარეა: ' + b.batteryLevel + '%' + (b.charging ? ' · იტენება' : ''));
+    if (b.browserTimezone) bParts.push('ბრაუზერის სარტყელი: ' + b.browserTimezone);
+    if (b.languages && b.languages.length > 0) bParts.push('ენები: ' + b.languages.join(', '));
+    if (b.cores) bParts.push('ბირთვები: ' + b.cores);
+    if (b.deviceMemory !== null && b.deviceMemory !== undefined) bParts.push('მეხსიერება: ' + b.deviceMemory + ' GB');
+    if (b.connection) bParts.push('კავშირი: ' + b.connection);
+    if (b.fingerprint) bParts.push('ანაბეჭდი: ' + b.fingerprint);
+    if (bParts.length > 0) {
+      const bEl = document.createElement('p');
+      bEl.className = 'link-meta';
+      bEl.textContent = '🔍 ' + bParts.join(' · ');
+      card.appendChild(bEl);
+    }
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'result-actions';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn small';
+  copyBtn.type = 'button';
+  copyBtn.textContent = 'კოპირება';
+  copyBtn.addEventListener('click', async () => {
+    if (await copyText(v.ip)) toast('IP დაკოპირდა');
+    else toast('კოპირება ვერ მოხერხდა');
+  });
+  actions.appendChild(copyBtn);
+  card.appendChild(actions);
+  return card;
+}
+
+let logSearchTimer = null;
+$('link-log-search-input').addEventListener('input', () => {
+  clearTimeout(logSearchTimer);
+  logSearchTimer = setTimeout(() => loadLogVisits(false), 350);
+});
+$('link-log-more-btn').addEventListener('click', () => loadLogVisits(true));
+$('link-log-back-btn').addEventListener('click', () => showTab('links'));
+$('link-log-export-btn').addEventListener('click', () => {
+  if (!currentLogLink) return;
+  window.open('/api/admin/links/' + currentLogLink.id + '/visits/export', '_blank');
+});
+$('link-log-clear-btn').addEventListener('click', async () => {
+  if (!currentLogLink) return;
+  if (!window.confirm('ნამდვილად გავასუფთაო ამ ბმულის დაჭერების ჟურნალი?')) return;
+  try {
+    await api('/api/admin/links/' + currentLogLink.id + '/visits', { method: 'DELETE' });
+    toast('ჟურნალი გასუფთავდა');
+    loadLogVisits(false);
+  } catch (e) { toast(e.message || 'შეცდომა'); }
+});
 
 /* ---------------- QR favorites (v5, admin view) ---------------- */
 // The admin sees every logged-in user's saved QR codes, like links:

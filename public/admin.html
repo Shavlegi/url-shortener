@@ -103,6 +103,32 @@
       <p id="links-error" class="error" hidden></p>
     </section>
 
+    <section class="card" id="section-link-log" hidden>
+      <div class="result-actions">
+        <button id="link-log-back-btn" class="btn small" type="button">← უკან</button>
+      </div>
+      <h2>დაჭერების ჟურნალი</h2>
+      <p class="link-meta" id="link-log-summary">—</p>
+      <p class="muted">ჩაწერილია მხოლოდ ჩართული თვალთვალით. ჩანაწერები 90 დღის შემდეგ ავტომატურად იშლება; ბოტები და გამონაკლისში დამატებული IP-ები არ იწერება.</p>
+      <p class="link-meta" id="link-log-totals">—</p>
+      <div class="row">
+        <label class="field">
+          <span class="sr-only">ძებნა</span>
+          <input id="link-log-search-input" type="search" autocomplete="off" placeholder="ძებნა — IP, ქალაქი, პროვაიდერი…">
+        </label>
+      </div>
+      <div class="result-actions">
+        <button id="link-log-export-btn" class="btn" type="button">ექსპორტი</button>
+        <button id="link-log-clear-btn" class="btn danger-outline" type="button">გასუფთავება</button>
+      </div>
+      <p id="link-log-empty" class="muted" hidden>დაჭერები ჯერ არ არის.</p>
+      <div id="link-log-list" class="links-list"></div>
+      <div class="result-actions">
+        <button id="link-log-more-btn" class="btn" type="button" hidden>მეტის ჩატვირთვა</button>
+      </div>
+      <p id="link-log-error" class="error" hidden></p>
+    </section>
+
     <section class="card" id="section-users" hidden>
       <h2>მომხმარებლები</h2>
       <p class="muted">რეგისტრირებული მომხმარებლები. მომხმარებლის წაშლისას მისი ბმულები ანონიმური ხდება, მაგრამ მუშაობას აგრძელებს.</p>

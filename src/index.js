@@ -71,6 +71,11 @@ const CONFIG = {
   securityLogRetentionMs: 90 * 24 * 3600 * 1000, // v10.6: security events auto-delete after 90 days
   maxSecurityEvents: 5000, // v10.6: security_events cap (newest kept)
   securityEventDetailMax: 200, // v10.6: security event detail cap, chars
+  // v10.9: per-link click tracking (custom-alias admin links only).
+  linkVisitMaxPerLink: 5000, // link_visits cap per link (newest kept)
+  linkBeaconMaxPerMin: 60, // browser-data beacons per minute, per IP hash
+  linkBeaconMaxPerHour: 600, // browser-data beacons per hour, per IP hash
+  linkVisitBrowserDataMaxBytes: 4096, // stored browser-data JSON cap, bytes
   maxImportLinks: 500,
   // v2: user accounts (voluntary — anonymous shortening stays as-is).
   usernameMin: 3,
@@ -1276,6 +1281,71 @@ async function ensureV16Schema(env) {
   }
 }
 
+let v17SchemaChecked = false;
+
+// v10.9: per-link click tracking (admin-only, custom-alias links only).
+// `links.is_custom` marks links created with an explicitly provided
+// alias (admin create with alias, or import with an explicit alias);
+// auto-generated links (public form, Telegram bot) stay 0. Links
+// created before v10.9 stay 0 — tracking toggles appear only on custom
+// links created after this migration. `links.track_server` /
+// `links.track_browser` are the two per-link toggles (default OFF).
+// `link_visits` holds one row per recorded click on a tracked link:
+// the same 15 enrichment columns as `visitors`, plus an optional
+// `browser_data` JSON blob filled in by the interstitial page's beacon
+// (one-shot `beacon_token`). 90-day retention, newest 5000 rows kept
+// per link (see the redirect handler and the visits endpoints).
+async function ensureV17Schema(env) {
+  if (v17SchemaChecked) return;
+  try {
+    const flag = await env.DB.prepare(
+      "SELECT value FROM schema_meta WHERE key = 'v17_link_tracking'",
+    ).first();
+    if (flag && flag.value === '17') {
+      v17SchemaChecked = true;
+      return;
+    }
+  } catch (e) {
+    // schema_meta (or the flag) does not exist yet — migrate below.
+  }
+  try {
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
+    ).run();
+    await addColumnIfMissing(env, 'ALTER TABLE links ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(env, 'ALTER TABLE links ADD COLUMN track_server INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(env, 'ALTER TABLE links ADD COLUMN track_browser INTEGER NOT NULL DEFAULT 0');
+    await env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS link_visits (' +
+      'id INTEGER PRIMARY KEY AUTOINCREMENT, ' +
+      'link_id INTEGER NOT NULL REFERENCES links(id), ' +
+      'ip TEXT NOT NULL, ' +
+      'visited_at INTEGER NOT NULL, ' +
+      'beacon_token TEXT, ' +
+      'country TEXT, city TEXT, region TEXT, postal_code TEXT, ' +
+      'latitude REAL, longitude REAL, timezone TEXT, isp TEXT, asn INTEGER, is_eu INTEGER, ' +
+      'browser TEXT, os TEXT, device TEXT, language TEXT, referrer TEXT, ' +
+      'browser_data TEXT)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_link_visits_link ON link_visits(link_id, visited_at DESC)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_link_visits_time ON link_visits(visited_at)',
+    ).run();
+    await env.DB.prepare(
+      'CREATE INDEX IF NOT EXISTS idx_link_visits_token ON link_visits(beacon_token)',
+    ).run();
+    await env.DB.prepare(
+      "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('v17_link_tracking', '17')",
+    ).run();
+    v17SchemaChecked = true;
+  } catch (e) {
+    // Flag stays unset — the next request retries the migration.
+    console.error('v17 schema migration failed:', e && e.message ? e.message : e);
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Rate limiting (D1-backed, keyed by hashed IP — the limiter itself   */
 /* never stores raw IPs; visitor IPs live only in the v10 visitors    */
@@ -1516,7 +1586,50 @@ function linkRowToJson(request, row) {
     // Owner username when the query joined users (admin list), otherwise
     // null — anonymous links and queries without the join.
     owner: row.owner !== undefined && row.owner !== null ? row.owner : null,
+    // v10.9: custom-alias marker + per-link tracking toggles. Queries
+    // that don't select these columns get false — correct, because
+    // only admin-created custom links can ever be tracked.
+    isCustom: row.is_custom === 1,
+    trackServer: row.track_server === 1,
+    trackBrowser: row.track_browser === 1,
   };
+}
+
+// v10.9: one tracked-click row as admin JSON. browser_data is parsed
+// defensively (a corrupt blob reads as null, never an error).
+function linkVisitToJson(row) {
+  let browserData = null;
+  if (row.browser_data) {
+    try { browserData = JSON.parse(row.browser_data); } catch { browserData = null; }
+  }
+  return {
+    id: row.id,
+    ip: row.ip,
+    visitedAt: row.visited_at,
+    country: row.country || null,
+    city: row.city || null,
+    region: row.region || null,
+    postalCode: row.postal_code || null,
+    latitude: row.latitude === null || row.latitude === undefined ? null : row.latitude,
+    longitude: row.longitude === null || row.longitude === undefined ? null : row.longitude,
+    timezone: row.timezone || null,
+    isp: row.isp || null,
+    asn: row.asn === null || row.asn === undefined ? null : row.asn,
+    isEu: row.is_eu === 1,
+    browser: row.browser || null,
+    os: row.os || null,
+    device: row.device || null,
+    language: row.language || null,
+    referrer: row.referrer || null,
+    browserData,
+  };
+}
+
+// v10.9: one CSV cell — quoted when it contains a comma, quote or newline.
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2652,6 +2765,34 @@ async function logSecurityEvent(env, request, type, detail) {
   }
 }
 
+// v10.3: edge enrichment (Cloudflare request.cf — free, no third
+// party) + parsed device info + language + referrer origin. Raw
+// User-Agent is never stored, only the parsed browser/OS/device.
+// Shared by recordVisit (visitors table) and the v10.9 per-link click
+// log, so both record exactly the same fields.
+function collectVisitEnrichment(request) {
+  const cf = request.cf || {};
+  const parsed = parseUserAgent(request.headers.get('User-Agent'));
+  const country = (typeof cf.country === 'string' && cf.country) || request.headers.get('CF-IPCountry') || null;
+  return {
+    country: country ? String(country).slice(0, 2) : null,
+    city: typeof cf.city === 'string' && cf.city ? cf.city.slice(0, 100) : null,
+    region: typeof cf.region === 'string' && cf.region ? cf.region.slice(0, 100) : null,
+    postalCode: typeof cf.postalCode === 'string' && cf.postalCode ? cf.postalCode.slice(0, 20) : null,
+    latitude: typeof cf.latitude === 'number' ? cf.latitude : null,
+    longitude: typeof cf.longitude === 'number' ? cf.longitude : null,
+    timezone: typeof cf.timezone === 'string' && cf.timezone ? cf.timezone.slice(0, 50) : null,
+    isp: typeof cf.asOrganization === 'string' && cf.asOrganization ? cf.asOrganization.slice(0, 100) : null,
+    asn: typeof cf.asn === 'number' ? cf.asn : null,
+    isEu: typeof cf.isEUCountry === 'boolean' ? (cf.isEUCountry ? 1 : 0) : null,
+    browser: parsed.browser,
+    os: parsed.os,
+    device: parsed.device,
+    language: primaryLanguage(request),
+    referrer: referrerOrigin(request),
+  };
+}
+
 async function recordVisit(env, request, path) {
   try {
     const ua = request.headers.get('User-Agent');
@@ -2677,30 +2818,9 @@ async function recordVisit(env, request, path) {
       const userSession = await getUserSession(env, request);
       if (userSession) userId = userSession.userId;
     } catch { /* treat as anonymous */ }
-    // v10.3: edge enrichment (Cloudflare request.cf — free, no third
-    // party) + parsed device info + language + referrer origin. Raw
-    // User-Agent is never stored, only the parsed browser/OS/device.
-    // COALESCE keeps the last KNOWN value when a field is missing.
-    const cf = request.cf || {};
-    const parsed = parseUserAgent(ua);
-    const country = (typeof cf.country === 'string' && cf.country) || request.headers.get('CF-IPCountry') || null;
-    const e = {
-      country: country ? String(country).slice(0, 2) : null,
-      city: typeof cf.city === 'string' && cf.city ? cf.city.slice(0, 100) : null,
-      region: typeof cf.region === 'string' && cf.region ? cf.region.slice(0, 100) : null,
-      postalCode: typeof cf.postalCode === 'string' && cf.postalCode ? cf.postalCode.slice(0, 20) : null,
-      latitude: typeof cf.latitude === 'number' ? cf.latitude : null,
-      longitude: typeof cf.longitude === 'number' ? cf.longitude : null,
-      timezone: typeof cf.timezone === 'string' && cf.timezone ? cf.timezone.slice(0, 50) : null,
-      isp: typeof cf.asOrganization === 'string' && cf.asOrganization ? cf.asOrganization.slice(0, 100) : null,
-      asn: typeof cf.asn === 'number' ? cf.asn : null,
-      isEu: typeof cf.isEUCountry === 'boolean' ? (cf.isEUCountry ? 1 : 0) : null,
-      browser: parsed.browser,
-      os: parsed.os,
-      device: parsed.device,
-      language: primaryLanguage(request),
-      referrer: referrerOrigin(request),
-    };
+    // v10.3: edge enrichment — see collectVisitEnrichment. COALESCE
+    // keeps the last KNOWN value when a field is missing.
+    const e = collectVisitEnrichment(request);
     const { day, hour, cutoffDay } = tbilisiDayHour(now);
     await env.DB.batch([
       env.DB.prepare(
@@ -2757,11 +2877,207 @@ function scheduleVisit(env, ctx, request, path) {
   }
 }
 
+/* v10.9: per-link click log. Records one row in link_visits for a click
+   on a tracked link (track_server or track_browser ON). Same eligibility
+   rules as recordVisit: bots, missing/invalid IPs and admin-excluded
+   IPs are never recorded. When withToken is true (browser tracking),
+   the row gets a one-shot beacon token that the interstitial page uses
+   to attach browser data; the token is returned so the page can carry
+   it. Returns null when nothing was recorded (or recording failed) —
+   the caller then serves a plain 302. Never throws. */
+async function recordLinkVisit(env, request, linkRow, withToken) {
+  try {
+    if (isBot(request.headers.get('User-Agent'))) return null;
+    const ip = request.headers.get('CF-Connecting-IP');
+    if (!ip || ip === 'unknown' || ip.length > 45) return null;
+    await ensureV17Schema(env);
+    await ensureV11Schema(env);
+    const excluded = await env.DB.prepare(
+      'SELECT 1 AS x FROM ip_exclusions WHERE ip = ?',
+    ).bind(ip).first();
+    if (excluded) return null;
+    const e = collectVisitEnrichment(request);
+    const now = Date.now();
+    const token = withToken ? crypto.randomUUID() : null;
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO link_visits (link_id, ip, visited_at, beacon_token, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).bind(linkRow.id, ip, now, token, e.country, e.city, e.region, e.postalCode, e.latitude, e.longitude, e.timezone, e.isp, e.asn, e.isEu, e.browser, e.os, e.device, e.language, e.referrer),
+      env.DB.prepare(
+        'DELETE FROM link_visits WHERE visited_at < ?',
+      ).bind(now - CONFIG.visitorRetentionMs),
+      env.DB.prepare(
+        'DELETE FROM link_visits WHERE link_id = ? AND id NOT IN (' +
+        'SELECT id FROM link_visits WHERE link_id = ? ' +
+        'ORDER BY visited_at DESC, id DESC LIMIT ?)',
+      ).bind(linkRow.id, linkRow.id, CONFIG.linkVisitMaxPerLink),
+    ]);
+    return token;
+  } catch (err) {
+    console.error('recordLinkVisit failed:', err && err.message ? err.message : err);
+    return null;
+  }
+}
+
+// v10.9: interstitial page for browser-tracked links. The clicker sees
+// a brief "redirecting" page (destination hostname shown, manual
+// continue link, <noscript> fallback); inline JavaScript collects
+// browser data best-effort, beacons it once with the one-shot token,
+// then redirects. Every probe is guarded — one failure must not block
+// the others or the redirect, and a hard 4s cap means the visitor is
+// never stranded here. NO permission requests, NO geolocation, NO
+// WebRTC, NO camera/mic. The canvas fingerprint is a short hash — the
+// raw canvas image never leaves the browser.
+function renderRedirectPage(destination, token) {
+  let host = '';
+  try { host = new URL(destination).hostname; } catch { host = ''; }
+  const destJson = JSON.stringify(destination).replace(/</g, '\\u003c');
+  const tokenJson = JSON.stringify(token);
+  const hostHtml = escapeHtml(host || 'ბმული');
+  const destHtml = escapeHtml(destination);
+  return '<!DOCTYPE html>\n' +
+'<html lang="ka">\n' +
+'<head>\n' +
+'<meta charset="utf-8">\n' +
+'<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n' +
+'<meta name="robots" content="noindex,nofollow">\n' +
+'<noscript><meta http-equiv="refresh" content="0;url=' + destHtml + '"></noscript>\n' +
+'<title>გადამისამართება… — Mini Link</title>\n' +
+'<style>\n' +
+':root{color-scheme:dark}\n' +
+'*{box-sizing:border-box}\n' +
+'body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Georgian",sans-serif;color:#fff;line-height:1.5;min-height:100vh;' +
+'background-color:#0d0620;' +
+'background-image:radial-gradient(600px 380px at 8% -60px,rgba(56,189,248,.50),transparent 70%),radial-gradient(560px 360px at 98% 6%,rgba(232,121,249,.45),transparent 70%),radial-gradient(720px 480px at 50% 118%,rgba(124,58,237,.55),transparent 72%);' +
+'background-attachment:fixed;background-repeat:no-repeat}\n' +
+'.wrap{max-width:480px;margin:0 auto;padding:70px 20px 48px;text-align:center}\n' +
+'.spinner{width:44px;height:44px;margin:0 auto 22px;border-radius:50%;border:4px solid rgba(216,180,254,.25);border-top-color:#c084fc;animation:spin 0.9s linear infinite}\n' +
+'@keyframes spin{to{transform:rotate(360deg)}}\n' +
+'h1{font-size:1.35rem;margin:0 0 8px}\n' +
+'p{color:#e9d5ff;margin:6px 0;word-break:break-word}\n' +
+'a{color:#fff}\n' +
+'</style>\n' +
+'</head>\n' +
+'<body>\n' +
+'<main class="wrap">\n' +
+'  <div class="spinner" aria-hidden="true"></div>\n' +
+'  <h1>გადამისამართება…</h1>\n' +
+'  <p>გადადიხართ: ' + hostHtml + '</p>\n' +
+'  <p>თუ გვერდი არ გაიხსნა, <a href="' + destHtml + '">დააჭირეთ აქ</a>.</p>\n' +
+'</main>\n' +
+'<script>\n' +
+'(function(){\n' +
+'  var dest = ' + destJson + ';\n' +
+'  var token = ' + tokenJson + ';\n' +
+'  var done = false;\n' +
+'  function go(){ if(done) return; done = true; location.replace(dest); }\n' +
+'  function t(fn){ try { return fn(); } catch(e){ return null; } }\n' +
+'  function probeIncognito(){\n' +
+'    return new Promise(function(res){\n' +
+'      try {\n' +
+'        if(!navigator.storage || !navigator.storage.estimate){ res(null); return; }\n' +
+'        var to = setTimeout(function(){ res(null); }, 300);\n' +
+'        navigator.storage.estimate().then(function(e){\n' +
+'          clearTimeout(to);\n' +
+'          res(typeof e.quota === "number" ? (e.quota < 120000000) : null);\n' +
+'        }).catch(function(){ clearTimeout(to); res(null); });\n' +
+'      } catch(e){ res(null); }\n' +
+'    });\n' +
+'  }\n' +
+'  function probeBattery(){\n' +
+'    return new Promise(function(res){\n' +
+'      var empty = { level: null, charging: null };\n' +
+'      try {\n' +
+'        if(!navigator.getBattery){ res(empty); return; }\n' +
+'        var to = setTimeout(function(){ res(empty); }, 300);\n' +
+'        navigator.getBattery().then(function(b){\n' +
+'          clearTimeout(to);\n' +
+'          res({ level: Math.round(b.level * 100), charging: !!b.charging });\n' +
+'        }).catch(function(){ clearTimeout(to); res(empty); });\n' +
+'      } catch(e){ res(empty); }\n' +
+'    });\n' +
+'  }\n' +
+'  function collect(){\n' +
+'    var d = {};\n' +
+'    d.screen = t(function(){ return window.screen ? (window.screen.width + "x" + window.screen.height) : null; });\n' +
+'    d.refreshRate = t(function(){ return (window.screen && typeof window.screen.refreshRate === "number") ? Math.round(window.screen.refreshRate) : null; });\n' +
+'    d.gpu = t(function(){\n' +
+'      var c = document.createElement("canvas");\n' +
+'      var gl = c.getContext("webgl") || c.getContext("experimental-webgl");\n' +
+'      if(!gl) return null;\n' +
+'      var ext = gl.getExtension("WEBGL_debug_renderer_info");\n' +
+'      if(!ext) return null;\n' +
+'      var r = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL);\n' +
+'      return typeof r === "string" ? r.slice(0, 200) : null;\n' +
+'    });\n' +
+'    d.orientation = t(function(){ return (window.screen && window.screen.orientation && window.screen.orientation.type) || null; });\n' +
+'    d.colorScheme = t(function(){ return (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light"; });\n' +
+'    d.touchPoints = t(function(){ return typeof navigator.maxTouchPoints === "number" ? navigator.maxTouchPoints : null; });\n' +
+'    d.adblock = t(function(){\n' +
+'      var bait = document.createElement("div");\n' +
+'      bait.className = "adsbox ad-banner";\n' +
+'      bait.style.cssText = "position:absolute;left:-9999px;width:1px;height:1px;";\n' +
+'      document.body.appendChild(bait);\n' +
+'      var blocked = bait.offsetHeight === 0;\n' +
+'      document.body.removeChild(bait);\n' +
+'      return blocked;\n' +
+'    });\n' +
+'    d.browserTimezone = t(function(){ return Intl.DateTimeFormat().resolvedOptions().timeZone || null; });\n' +
+'    d.languages = t(function(){ return Array.isArray(navigator.languages) ? navigator.languages.slice(0, 10) : null; });\n' +
+'    d.cores = t(function(){ return typeof navigator.hardwareConcurrency === "number" ? navigator.hardwareConcurrency : null; });\n' +
+'    d.deviceMemory = t(function(){ return typeof navigator.deviceMemory === "number" ? navigator.deviceMemory : null; });\n' +
+'    d.connection = t(function(){ var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection; return (c && c.effectiveType) ? String(c.effectiveType).slice(0, 20) : null; });\n' +
+'    d.fingerprint = t(function(){\n' +
+'      var c = document.createElement("canvas");\n' +
+'      c.width = 200; c.height = 50;\n' +
+'      var x = c.getContext("2d");\n' +
+'      if(!x) return null;\n' +
+'      x.textBaseline = "top";\n' +
+'      x.font = "14px Arial";\n' +
+'      x.fillStyle = "#f60";\n' +
+'      x.fillRect(0, 0, 100, 25);\n' +
+'      x.fillStyle = "#069";\n' +
+'      x.fillText("Mini Link", 2, 2);\n' +
+'      var url = c.toDataURL();\n' +
+'      var h1 = 5381, h2 = 5381;\n' +
+'      for (var i = 0; i < url.length; i++) {\n' +
+'        var ch = url.charCodeAt(i);\n' +
+'        h1 = ((h1 << 5) + h1 + ch) >>> 0;\n' +
+'        h2 = ((h2 << 5) + h2 + ch + i) >>> 0;\n' +
+'      }\n' +
+'      return (h1.toString(16) + h2.toString(16)).slice(0, 16);\n' +
+'    });\n' +
+'    return d;\n' +
+'  }\n' +
+'  function send(){\n' +
+'    Promise.all([probeIncognito(), probeBattery()]).then(function(r){\n' +
+'      var d = collect();\n' +
+'      d.incognito = r[0];\n' +
+'      d.batteryLevel = r[1].level;\n' +
+'      d.charging = r[1].charging;\n' +
+'      var sent = false;\n' +
+'      var timer = setTimeout(function(){ if(!sent){ sent = true; go(); } }, 1200);\n' +
+'      try {\n' +
+'        fetch("/api/link-beacon", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: token, data: d }), keepalive: true })\n' +
+'          .then(function(){ clearTimeout(timer); if(!sent){ sent = true; go(); } })\n' +
+'          .catch(function(){ clearTimeout(timer); if(!sent){ sent = true; go(); } });\n' +
+'      } catch(e){ clearTimeout(timer); go(); }\n' +
+'    }).catch(function(){ go(); });\n' +
+'  }\n' +
+'  setTimeout(go, 4000);\n' +
+'  send();\n' +
+'})();\n' +
+'</script>\n' +
+'</body>\n' +
+'</html>\n';
+}
+
 async function handleRedirect(request, env, alias) {
   const url = new URL(request.url);
   const now = Date.now();
   const row = await env.DB.prepare(
-    'SELECT id, destination, enabled, expires_at FROM links WHERE alias = ?',
+    'SELECT id, destination, enabled, expires_at, track_server, track_browser FROM links WHERE alias = ?',
   ).bind(alias).first();
   if (!row) return new Response('ბმული არ მოიძებნა.', { status: 404 });
   if (row.enabled !== 1) return new Response('ბმული გამორთულია.', { status: 410 });
@@ -2790,6 +3106,23 @@ async function handleRedirect(request, env, alias) {
       ]);
     } catch (e) {
       console.error('click increment failed:', e && e.message ? e.message : e);
+    }
+  }
+  // v10.9: per-link click tracking (custom links with a toggle ON).
+  // Server tracking records the click and redirects instantly. Browser
+  // tracking serves the interstitial page instead of the 302 — but
+  // only when a visit row was actually recorded (bots, excluded IPs
+  // and recording failures fall through to the plain 302, so link
+  // previews and excluded visitors are never stranded). Untracked
+  // links behave exactly as before.
+  const trackServer = row.track_server === 1;
+  const trackBrowser = row.track_browser === 1;
+  if (trackServer || trackBrowser) {
+    const token = await recordLinkVisit(env, request, row, trackBrowser);
+    if (trackBrowser && token) {
+      return new Response(renderRedirectPage(row.destination, token), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
     }
   }
   return Response.redirect(row.destination, 302);
@@ -2851,6 +3184,85 @@ async function verifyTurnstile(env, token) {
   }
 }
 
+// v10.9: validates the browser-data object sent by the interstitial
+// page. Allowlisted keys only; unknown keys are dropped (forward
+// compatibility with newer/older page versions), wrong types or
+// oversized values for known keys are rejected. Null means "the
+// browser could not provide this" and is kept. Returns the cleaned
+// object and its JSON string (size-capped).
+function validateBrowserData(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, reason: 'ბრაუზერის მონაცემები ობიექტი უნდა იყოს.' };
+  }
+  const out = {};
+  const str = (key, max, pattern) => {
+    if (data[key] === undefined) return true;
+    const v = data[key];
+    if (v === null) { out[key] = null; return true; }
+    if (typeof v !== 'string' || v.length > max) return false;
+    if (pattern && !pattern.test(v)) return false;
+    out[key] = v;
+    return true;
+  };
+  const int = (key, min, max) => {
+    if (data[key] === undefined) return true;
+    const v = data[key];
+    if (v === null) { out[key] = null; return true; }
+    if (!Number.isInteger(v) || v < min || v > max) return false;
+    out[key] = v;
+    return true;
+  };
+  const bool = (key) => {
+    if (data[key] === undefined) return true;
+    const v = data[key];
+    if (v === null) { out[key] = null; return true; }
+    if (typeof v !== 'boolean') return false;
+    out[key] = v;
+    return true;
+  };
+  if (!str('screen', 20, /^\d+x\d+$/)) return { ok: false, reason: 'არასწორი ეკრანის ზომა.' };
+  if (!int('refreshRate', 1, 1000)) return { ok: false, reason: 'არასწორი განახლების სიხშირე.' };
+  if (!str('gpu', 200)) return { ok: false, reason: 'არასწორი GPU.' };
+  if (!str('orientation', 30)) return { ok: false, reason: 'არასწორი ორიენტაცია.' };
+  if (data.colorScheme !== undefined) {
+    if (data.colorScheme !== null && data.colorScheme !== 'light' && data.colorScheme !== 'dark') {
+      return { ok: false, reason: 'არასწორი ფერის სქემა.' };
+    }
+    out.colorScheme = data.colorScheme;
+  }
+  if (!int('touchPoints', 0, 100)) return { ok: false, reason: 'არასწორი შეხების წერტილები.' };
+  if (!bool('incognito')) return { ok: false, reason: 'არასწორი ინკოგნიტო ნიშანი.' };
+  if (!bool('adblock')) return { ok: false, reason: 'არასწორი რეკლამის ბლოკერის ნიშანი.' };
+  if (!int('batteryLevel', 0, 100)) return { ok: false, reason: 'არასწორი ბატარეის დონე.' };
+  if (!bool('charging')) return { ok: false, reason: 'არასწორი დამუხტვის ნიშანი.' };
+  if (!str('browserTimezone', 60)) return { ok: false, reason: 'არასწორი დროის სარტყელი.' };
+  if (data.languages !== undefined) {
+    const langs = data.languages;
+    if (langs !== null) {
+      if (!Array.isArray(langs) || langs.length > 10) return { ok: false, reason: 'არასწორი ენების სია.' };
+      for (const l of langs) {
+        if (typeof l !== 'string' || l.length === 0 || l.length > 20) return { ok: false, reason: 'არასწორი ენების სია.' };
+      }
+    }
+    out.languages = langs;
+  }
+  if (!int('cores', 1, 1024)) return { ok: false, reason: 'არასწორი ბირთვების რაოდენობა.' };
+  if (data.deviceMemory !== undefined) {
+    const m = data.deviceMemory;
+    if (m !== null && (typeof m !== 'number' || !Number.isFinite(m) || m < 0 || m > 1024)) {
+      return { ok: false, reason: 'არასწორი მეხსიერება.' };
+    }
+    out.deviceMemory = m;
+  }
+  if (!str('connection', 20)) return { ok: false, reason: 'არასწორი კავშირის ტიპი.' };
+  if (!str('fingerprint', 16, /^[0-9a-f]{1,16}$/)) return { ok: false, reason: 'არასწორი თითის ანაბეჭდი.' };
+  const json = JSON.stringify(out);
+  if (textEncoder().encode(json).length > CONFIG.linkVisitBrowserDataMaxBytes) {
+    return { ok: false, reason: 'ბრაუზერის მონაცემები ძალიან დიდია.' };
+  }
+  return { ok: true, data: out, json };
+}
+
 async function handleApi(request, env, url) {
   const path = url.pathname;
   const method = request.method;
@@ -2890,6 +3302,8 @@ async function handleApi(request, env, url) {
   await ensureV15Schema(env);
   // v10.7 schema (visitors is_favorite) — same lazy pattern, see ensureV16Schema.
   await ensureV16Schema(env);
+  // v10.9 schema (links is_custom/track flags + link_visits) — same lazy pattern, see ensureV17Schema.
+  await ensureV17Schema(env);
 
   // --- v7: Telegram bot webhook (no session; secret-token auth) -------
   // Lives here, before the session check, because Telegram calls it —
@@ -3381,6 +3795,37 @@ async function handleApi(request, env, url) {
     ).bind(w + 'x' + h).run();
     return json({ ok: true });
   }
+
+  // --- v10.9: browser-data beacon (public, one-shot token) -------------
+  // Fired by the interstitial page of a browser-tracked link. The token
+  // is a random UUID minted when the click was recorded; it is consumed
+  // on first use (unknown/consumed tokens get 404), so a beacon can only
+  // ever attach data to its own click row. Rate-limited per IP hash like
+  // visit-events. Strict payload validation (see validateBrowserData).
+  if (path === '/api/link-beacon' && method === 'POST') {
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const allowedMin = await checkRateLimit(request, env, 'link-beacon', CONFIG.linkBeaconMaxPerMin, 60);
+    const allowedHour = allowedMin && await checkRateLimit(request, env, 'link-beacon-hour', CONFIG.linkBeaconMaxPerHour, 3600);
+    if (!allowedHour) return error('ძალიან ბევრი მოთხოვნა. სცადეთ მოგვიანებით.', 429);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const token = parsed.body.token;
+    if (typeof token !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token)) {
+      return error('არასწორი ტოკენი.', 400);
+    }
+    const v = validateBrowserData(parsed.body.data);
+    if (!v.ok) return error(v.reason, 400);
+    const row = await env.DB.prepare('SELECT id FROM link_visits WHERE beacon_token = ?').bind(token).first();
+    if (!row) return error('ტოკენი ვერ მოიძებნა.', 404);
+    try {
+      await env.DB.prepare(
+        'UPDATE link_visits SET browser_data = ?, beacon_token = NULL WHERE id = ?',
+      ).bind(v.json, row.id).run();
+    } catch {
+      return error('ჩაწერა ვერ მოხერხდა.', 500);
+    }
+    return json({ ok: true });
+  }
   if (path === '/api/qr-log' && method === 'POST') {
     if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
     const allowedMin = await checkRateLimit(request, env, 'qr-log', 20, 60);
@@ -3481,6 +3926,10 @@ async function handleApi(request, env, url) {
       // profiles table may not exist yet.
       try {
         await env.DB.prepare('DELETE FROM profile_links WHERE link_id = ?').bind(id).run();
+      } catch { /* ignore */ }
+      // v10.9: drop this link's tracked-click rows with it.
+      try {
+        await env.DB.prepare('DELETE FROM link_visits WHERE link_id = ?').bind(id).run();
       } catch { /* ignore */ }
       const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
       if (!res.success || (res.meta && res.meta.changes === 0)) {
@@ -3950,14 +4399,14 @@ async function handleApi(request, env, url) {
     if (search) {
       const like = '%' + search.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
       rows = await env.DB.prepare(
-        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, u.username AS owner ' +
+        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, l.is_custom, l.track_server, l.track_browser, u.username AS owner ' +
         'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
         'WHERE l.alias LIKE ? ESCAPE \'\\\' OR l.destination LIKE ? ESCAPE \'\\\' OR l.note LIKE ? ESCAPE \'\\\' ' +
         'ORDER BY ' + linkOrder + ' LIMIT ?',
       ).bind(like, like, like, CONFIG.maxLinksList).all();
     } else {
       rows = await env.DB.prepare(
-        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, u.username AS owner ' +
+        'SELECT l.id, l.alias, l.destination, l.created_at, l.expires_at, l.enabled, l.clicks, l.note, l.is_custom, l.track_server, l.track_browser, u.username AS owner ' +
         'FROM links l LEFT JOIN users u ON u.id = l.user_id ' +
         'ORDER BY ' + linkOrder + ' LIMIT ?',
       ).bind(CONFIG.maxLinksList).all();
@@ -4044,8 +4493,8 @@ async function handleApi(request, env, url) {
       finalAlias = av.alias;
       try {
         const ins = await env.DB.prepare(
-          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id, note) ' +
-          'VALUES (?, ?, ?, ?, 1, 0, NULL, ?)',
+          'INSERT INTO links (alias, destination, created_at, expires_at, enabled, clicks, user_id, note, is_custom) ' +
+          'VALUES (?, ?, ?, ?, 1, 0, NULL, ?, 1)',
         ).bind(finalAlias, v.url, Date.now(), expiresMs, nv.note).run();
         if (!ins.success) return error('ბმულის შექმნა ვერ მოხერხდა.', 500);
       } catch (e) {
@@ -4061,7 +4510,7 @@ async function handleApi(request, env, url) {
     }
 
     const row = await env.DB.prepare(
-      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note FROM links WHERE alias = ?',
+      'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note, is_custom, track_server, track_browser FROM links WHERE alias = ?',
     ).bind(finalAlias).first();
     return json({ link: linkRowToJson(request, row) }, 201);
   }
@@ -4096,6 +4545,126 @@ async function handleApi(request, env, url) {
       'ORDER BY clicked_at DESC, id DESC LIMIT 50',
     ).bind(id).all();
     return json({ events: (rows.results || []).map((r) => ({ clickedAt: r.clicked_at })) });
+  }
+
+  // --- v10.9: per-link tracking toggles (admin only, custom links) --
+  // Two separate toggles: trackServer (instant redirect, invisible)
+  // and trackBrowser (interstitial page, collects browser data).
+  // Browser tracking needs the server log to attach to: turning it on
+  // also turns server tracking on; turning server tracking off also
+  // turns browser tracking off. Non-custom links get 400 — tracking
+  // exists only on custom-alias links created in the admin panel.
+  const linkTrackingMatch = path.match(/^\/api\/admin\/links\/(\d+)\/tracking$/);
+  if (linkTrackingMatch) {
+    if (method !== 'PATCH') return error('მეთოდი დაუშვებელია.', 405);
+    if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+    const parsed = await readJson(request);
+    if (!parsed.ok) return error(parsed.reason, 400);
+    const hasServer = parsed.body.trackServer !== undefined;
+    const hasBrowser = parsed.body.trackBrowser !== undefined;
+    if (!hasServer && !hasBrowser) return error('შესაცვლელი არაფერია.', 400);
+    if (hasServer && typeof parsed.body.trackServer !== 'boolean') return error('სერვერის თვალთვალის მნიშვნელობა არასწორია.', 400);
+    if (hasBrowser && typeof parsed.body.trackBrowser !== 'boolean') return error('ბრაუზერის თვალთვალის მნიშვნელობა არასწორია.', 400);
+    const id = parseInt(linkTrackingMatch[1], 10);
+    const link = await env.DB.prepare(
+      'SELECT id, alias, is_custom, track_server, track_browser FROM links WHERE id = ?',
+    ).bind(id).first();
+    if (!link) return error('ბმული არ მოიძებნა.', 404);
+    if (link.is_custom !== 1) return error('თვალთვალი მხოლოდ custom ბმულებზე შეიძლება.', 400);
+    let newServer = hasServer ? parsed.body.trackServer : link.track_server === 1;
+    let newBrowser = hasBrowser ? parsed.body.trackBrowser : link.track_browser === 1;
+    if (newBrowser) newServer = true;
+    if (!newServer) newBrowser = false;
+    await env.DB.prepare(
+      'UPDATE links SET track_server = ?, track_browser = ? WHERE id = ?',
+    ).bind(newServer ? 1 : 0, newBrowser ? 1 : 0, id).run();
+    return json({ ok: true, id: link.id, alias: link.alias, trackServer: newServer, trackBrowser: newBrowser });
+  }
+
+  // --- v10.9: click log of one link (admin only) ----------------------
+  // Newest first, paginated, with the same LIKE search as the visitors
+  // list (IP, country, city, region, ISP, browser, OS, device).
+  // Stale rows (90 days) are pruned on read. DELETE clears only this
+  // link's log.
+  const linkVisitsMatch = path.match(/^\/api\/admin\/links\/(\d+)\/visits$/);
+  if (linkVisitsMatch) {
+    const id = parseInt(linkVisitsMatch[1], 10);
+    const link = await env.DB.prepare(
+      'SELECT id, alias, destination, track_server, track_browser FROM links WHERE id = ?',
+    ).bind(id).first();
+    if (!link) return error('ბმული არ მოიძებნა.', 404);
+    if (method === 'GET') {
+      await env.DB.prepare(
+        'DELETE FROM link_visits WHERE visited_at < ?',
+      ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
+      const limitRaw = parseInt(url.searchParams.get('limit') || '50', 10);
+      const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, limitRaw)) : 50;
+      const offsetRaw = parseInt(url.searchParams.get('offset') || '0', 10);
+      const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? offsetRaw : 0;
+      const q = (url.searchParams.get('q') || '').trim();
+      let where = 'WHERE link_id = ?';
+      const binds = [id];
+      if (q) {
+        const like = '%' + q.replace(/[%_\\]/g, (c) => '\\' + c) + '%';
+        where += ' AND (ip LIKE ? ESCAPE \'\\\' OR country LIKE ? ESCAPE \'\\\' OR city LIKE ? ESCAPE \'\\\' OR region LIKE ? ESCAPE \'\\\' OR isp LIKE ? ESCAPE \'\\\' OR browser LIKE ? ESCAPE \'\\\' OR os LIKE ? ESCAPE \'\\\' OR device LIKE ? ESCAPE \'\\\')';
+        for (let i = 0; i < 8; i++) binds.push(like);
+      }
+      const totalRow = await env.DB.prepare(
+        'SELECT COUNT(*) AS c FROM link_visits ' + where,
+      ).bind(...binds).first();
+      const rows = await env.DB.prepare(
+        'SELECT id, ip, visited_at, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, browser_data FROM link_visits ' +
+        where + ' ORDER BY visited_at DESC, id DESC LIMIT ? OFFSET ?',
+      ).bind(...binds, limit, offset).all();
+      return json({
+        visits: (rows.results || []).map(linkVisitToJson),
+        total: totalRow ? totalRow.c : 0,
+        link: {
+          id: link.id,
+          alias: link.alias,
+          destination: link.destination,
+          trackServer: link.track_server === 1,
+          trackBrowser: link.track_browser === 1,
+        },
+      });
+    }
+    if (method === 'DELETE') {
+      if (!originAllowed(request)) return error('არასწორი წყარო (Origin).', 403);
+      const res = await env.DB.prepare('DELETE FROM link_visits WHERE link_id = ?').bind(id).run();
+      return json({ ok: true, deleted: res.meta ? res.meta.changes : 0 });
+    }
+    return error('მეთოდი დაუშვებელია.', 405);
+  }
+
+  // --- v10.9: export one link's click log as CSV (admin only) ---------
+  const linkVisitsExportMatch = path.match(/^\/api\/admin\/links\/(\d+)\/visits\/export$/);
+  if (linkVisitsExportMatch) {
+    if (method !== 'GET') return error('მეთოდი დაუშვებელია.', 405);
+    const id = parseInt(linkVisitsExportMatch[1], 10);
+    const link = await env.DB.prepare('SELECT id, alias FROM links WHERE id = ?').bind(id).first();
+    if (!link) return error('ბმული არ მოიძებნა.', 404);
+    await env.DB.prepare(
+      'DELETE FROM link_visits WHERE visited_at < ?',
+    ).bind(Date.now() - CONFIG.visitorRetentionMs).run();
+    const rows = await env.DB.prepare(
+      'SELECT ip, visited_at, country, city, region, postal_code, latitude, longitude, timezone, isp, asn, is_eu, browser, os, device, language, referrer, browser_data FROM link_visits ' +
+      'WHERE link_id = ? ORDER BY visited_at DESC, id DESC LIMIT ?',
+    ).bind(id, CONFIG.linkVisitMaxPerLink).all();
+    const header = ['visited_at', 'ip', 'country', 'city', 'region', 'postal_code', 'latitude', 'longitude', 'timezone', 'isp', 'asn', 'is_eu', 'browser', 'os', 'device', 'language', 'referrer', 'browser_data'];
+    const lines = [header.join(',')];
+    for (const r of (rows.results || [])) {
+      lines.push([
+        new Date(r.visited_at).toISOString(), r.ip, r.country, r.city, r.region, r.postal_code,
+        r.latitude, r.longitude, r.timezone, r.isp, r.asn, r.is_eu === 1 ? 1 : 0,
+        r.browser, r.os, r.device, r.language, r.referrer, r.browser_data,
+      ].map(csvCell).join(','));
+    }
+    return new Response('\uFEFF' + lines.join('\r\n') + '\r\n', {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': 'attachment; filename="link-' + link.alias + '-visits.csv"',
+      },
+    });
   }
 
   // --- Update / delete one link ------------------------------------------
@@ -4139,7 +4708,7 @@ async function handleApi(request, env, url) {
         return error('ბმული არ მოიძებნა.', 404);
       }
       const row = await env.DB.prepare(
-        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note FROM links WHERE id = ?',
+        'SELECT id, alias, destination, created_at, expires_at, enabled, clicks, note, is_custom, track_server, track_browser FROM links WHERE id = ?',
       ).bind(id).first();
       return json({ link: linkRowToJson(request, row) });
     }
@@ -4151,6 +4720,10 @@ async function handleApi(request, env, url) {
       // profiles table may not exist yet.
       try {
         await env.DB.prepare('DELETE FROM profile_links WHERE link_id = ?').bind(id).run();
+      } catch { /* ignore */ }
+      // v10.9: drop this link's tracked-click rows with it.
+      try {
+        await env.DB.prepare('DELETE FROM link_visits WHERE link_id = ?').bind(id).run();
       } catch { /* ignore */ }
       const res = await env.DB.prepare('DELETE FROM links WHERE id = ?').bind(id).run();
       if (!res.success || (res.meta && res.meta.changes === 0)) {
@@ -4201,8 +4774,8 @@ async function handleApi(request, env, url) {
       const note = nv.ok ? nv.note : null;
       try {
         const ins = await env.DB.prepare(
-          'INSERT OR IGNORE INTO links (alias, destination, created_at, expires_at, enabled, clicks, note) ' +
-          'VALUES (?, ?, ?, ?, ?, ?, ?)',
+          'INSERT OR IGNORE INTO links (alias, destination, created_at, expires_at, enabled, clicks, note, is_custom) ' +
+          'VALUES (?, ?, ?, ?, ?, ?, ?, 1)',
         ).bind(av.alias, v.url, createdAt, expiresMs, enabled, clicks, note).run();
         if (ins.meta && ins.meta.changes === 1) inserted++;
         else skipped++;
