@@ -33,6 +33,8 @@ const FILES = {
   '/auth.js': { path: 'public/auth.js', type: 'text/javascript; charset=utf-8' },
   '/qr-maker.js': { path: 'public/qr-maker.js', type: 'text/javascript; charset=utf-8' },
   '/qrcode.min.js': { path: 'public/qrcode.min.js', type: 'text/javascript; charset=utf-8' },
+  '/robots.txt': { path: 'public/robots.txt', type: 'text/plain; charset=utf-8' },
+  '/sitemap.xml': { path: 'public/sitemap.xml', type: 'application/xml; charset=utf-8' },
 };
 
 const embedded = {};

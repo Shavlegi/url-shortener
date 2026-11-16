@@ -2634,6 +2634,8 @@ const STATIC_TYPES = {
   '/qr-maker.js': 'text/javascript; charset=utf-8',
   '/qrcode.min.js': 'text/javascript; charset=utf-8',
   '/favicon.ico': 'image/x-icon',
+  '/robots.txt': 'text/plain; charset=utf-8',
+  '/sitemap.xml': 'application/xml; charset=utf-8',
 };
 
 // Files that exist only for the admin panel — never served on the public host.
