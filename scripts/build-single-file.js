@@ -9,7 +9,7 @@
  * What it does:
  *  - reads public/index.html, public/admin.html, public/styles.css,
  *    public/app.js, public/public.js, public/auth.js, public/qr-maker.js,
- *    public/qrcode.min.js
+ *    public/qr-art.js, public/qrcode.min.js
  *  - inlines them into the `EMBEDDED_FILES` constant of src/index.js
  *  - writes the result to dist/worker-single-file.js
  *
@@ -32,6 +32,7 @@ const FILES = {
   '/public.js': { path: 'public/public.js', type: 'text/javascript; charset=utf-8' },
   '/auth.js': { path: 'public/auth.js', type: 'text/javascript; charset=utf-8' },
   '/qr-maker.js': { path: 'public/qr-maker.js', type: 'text/javascript; charset=utf-8' },
+  '/qr-art.js': { path: 'public/qr-art.js', type: 'text/javascript; charset=utf-8' },
   '/qrcode.min.js': { path: 'public/qrcode.min.js', type: 'text/javascript; charset=utf-8' },
   '/robots.txt': { path: 'public/robots.txt', type: 'text/plain; charset=utf-8' },
   '/sitemap.xml': { path: 'public/sitemap.xml', type: 'application/xml; charset=utf-8' },

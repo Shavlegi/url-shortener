@@ -273,6 +273,8 @@ const QR_FAV_LOCAL_MAX = 50;
 
 let makerType = 'link';
 let makerLogoImg = null;
+let makerArtImg = null;
+let makerArtBlend = 0.75;
 let makerCurrent = null; // { type, label, payload, fg, bg }
 
 function makerLoggedIn() {
@@ -366,6 +368,48 @@ $('qr-logo-clear').addEventListener('click', () => {
   if (makerCurrent) renderMakerQr();
 });
 
+// Artistic QR: a picture blended into the code (like the video). The
+// picture is drawn under the modules with error correction H; the
+// blend slider trades picture visibility against scan reliability.
+// Only images from the user's device; art wins over the centre logo.
+$('qr-art-input').addEventListener('change', () => {
+  const file = $('qr-art-input').files && $('qr-art-input').files[0];
+  if (!file) return;
+  if (!file.type || file.type.indexOf('image/') !== 0) {
+    toast('აირჩიეთ სურათის ფაილი');
+    $('qr-art-input').value = '';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      makerArtImg = img;
+      $('qr-art-name').textContent = 'არტი: ' + file.name;
+      $('qr-art-clear').hidden = false;
+      $('qr-art-blend-field').hidden = false;
+      $('qr-art-note').hidden = false;
+      if (makerCurrent) renderMakerQr();
+    };
+    img.onerror = () => toast('სურათის ჩატვირთვა ვერ მოხერხდა');
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+});
+$('qr-art-clear').addEventListener('click', () => {
+  makerArtImg = null;
+  $('qr-art-input').value = '';
+  $('qr-art-name').textContent = '';
+  $('qr-art-clear').hidden = true;
+  $('qr-art-blend-field').hidden = true;
+  $('qr-art-note').hidden = true;
+  if (makerCurrent) renderMakerQr();
+});
+$('qr-art-blend').addEventListener('input', () => {
+  makerArtBlend = Number($('qr-art-blend').value) / 100;
+  if (makerCurrent) renderMakerQr();
+});
+
 function makerFieldValues() {
   if (makerType === 'link' || makerType === 'review') return { url: $('qr-url-input').value };
   if (makerType === 'instagram') return { handle: $('qr-handle-input').value };
@@ -389,11 +433,21 @@ function renderMakerQr() {
   if (!makerCurrent) return;
   try {
     // Rendered at 512px for a sharp PNG; CSS shows it at 256px.
-    drawQr($('qr-maker-canvas'), makerCurrent.payload, 512, {
-      fg: makerCurrent.fg,
-      bg: makerCurrent.bg,
-      logo: makerLogoImg || undefined,
-    });
+    if (makerArtImg && window.QrArt) {
+      // Artistic QR: picture blended in, error correction H.
+      window.QrArt.drawArtQr($('qr-maker-canvas'), makerCurrent.payload, makerArtImg, {
+        size: 512,
+        blend: makerArtBlend,
+        fg: makerCurrent.fg,
+        bg: makerCurrent.bg,
+      });
+    } else {
+      drawQr($('qr-maker-canvas'), makerCurrent.payload, 512, {
+        fg: makerCurrent.fg,
+        bg: makerCurrent.bg,
+        logo: makerLogoImg || undefined,
+      });
+    }
   } catch (e) {
     showError($('qr-maker-error'), 'QR კოდის შექმნა ვერ მოხერხდა: შიგთავსი ძალიან გრძელია');
     $('qr-maker-result').hidden = true;

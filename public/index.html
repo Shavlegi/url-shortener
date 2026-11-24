@@ -205,6 +205,16 @@
       <input id="qr-logo-input" type="file" accept="image/*">
     </label>
     <p class="muted"><span id="qr-logo-name"></span> <button type="button" class="btn link" id="qr-logo-clear" hidden>ლოგოს მოხსნა</button></p>
+    <label class="field">
+      <span>🎨 არტი <small>(არასავალდებულო — სურათი QR-ში, ვიდეოში როგორც არის)</small></span>
+      <input id="qr-art-input" type="file" accept="image/*">
+    </label>
+    <p class="muted"><span id="qr-art-name"></span> <button type="button" class="btn link" id="qr-art-clear" hidden>არტის მოხსნა</button></p>
+    <label class="field" id="qr-art-blend-field" hidden>
+      <span>შერევა <small>(მარცხნივ — მეტი სურათი, მარჯვნივ — უკეთესი სკანირება)</small></span>
+      <input id="qr-art-blend" class="qr-slider qr-blend" type="range" min="0" max="100" value="75">
+    </label>
+    <p class="muted" id="qr-art-note" hidden>არტი ჩართულია — ცენტრის ლოგო არ გამოჩნდება. სურათი თქვენს მოწყობილობაში რჩება, რჩეულებში არ ინახება.</p>
     <div class="result-actions">
       <button id="qr-make-btn" class="btn primary" type="button">QR-ის შექმნა</button>
       <button id="qr-scan-btn" class="btn" type="button">📷 სკანირება</button>
@@ -528,6 +538,7 @@
 </main>
 <script src="/qrcode.min.js"></script>
 <script src="/qr-maker.js"></script>
+<script src="/qr-art.js"></script>
 <script src="/public.js"></script>
 <script src="/auth.js"></script>
 </body>

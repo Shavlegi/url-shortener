@@ -122,7 +122,7 @@ const RESERVED_ALIASES = new Set([
   'api', 'admin', 'login', 'logout', 'static', 'assets', 'dashboard',
   'qr', 'export', 'import', 'health', 'robots.txt', 'favicon.ico',
   'sitemap.xml', 'index.html', 'admin.html', 'app.js', 'public.js',
-  'auth.js', 'public', 'styles.css', 'qrcode.min.js',
+  'auth.js', 'public', 'styles.css', 'qrcode.min.js', 'qr-art.js',
 ]);
 
 // Destination hosts that are themselves URL shorteners — linking to them would
@@ -2632,6 +2632,7 @@ const STATIC_TYPES = {
   '/public.js': 'text/javascript; charset=utf-8',
   '/auth.js': 'text/javascript; charset=utf-8',
   '/qr-maker.js': 'text/javascript; charset=utf-8',
+  '/qr-art.js': 'text/javascript; charset=utf-8',
   '/qrcode.min.js': 'text/javascript; charset=utf-8',
   '/favicon.ico': 'image/x-icon',
   '/robots.txt': 'text/plain; charset=utf-8',
